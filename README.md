@@ -28,28 +28,28 @@ subscription. There is no other account, key or cloud.
 <img src="docs/create.png" alt="A bracket made from one prompt">
 </td>
 <td width="50%" valign="top">
-<b>Change it with another prompt</b><br><br>
-<img src="docs/modify.png" alt="Mounting holes and rounded corners added by a second prompt">
+<b>Start from a photo of a sketch</b><br><br>
+<img src="docs/sketch.png" alt="A pencil drawing of a plate on paper, photographed with the camera and framed before it goes into the prompt">
 </td>
 </tr>
 <tr>
+<td width="50%" valign="top">
+<b>Change it with another prompt</b><br><br>
+<img src="docs/modify.png" alt="Mounting holes and rounded corners added by a second prompt">
+</td>
 <td width="50%" valign="top">
 <b>Point at the spot with a right-click</b><br><br>
 <img src="docs/spot.png" alt="A prompt typed at a hole picked with a right-click">
 </td>
-<td width="50%" valign="top">
-<b>Take what you need from an STL</b><br><br>
-<img src="docs/stl.png" alt="A plate that takes its screw spacing and bore from an STL of a motor">
-</td>
 </tr>
 <tr>
 <td width="50%" valign="top">
-<b>Go back in time</b><br><br>
-<img src="docs/history.png" alt="An earlier version of the bracket picked in the history">
+<b>Take what you need from an STL</b><br><br>
+<img src="docs/stl.png" alt="A plate that takes its screw spacing and bore from an STL of a motor, linked in the prompt with @">
 </td>
 <td width="50%" valign="top">
-<b>Keep models and STL files together</b><br><br>
-<img src="docs/list.png" alt="The models and the STL file of a project, each with a small picture">
+<b>Go back in time</b><br><br>
+<img src="docs/history.png" alt="An earlier version of the bracket picked in the history">
 </td>
 </tr>
 </table>

@@ -956,3 +956,140 @@ form.menu-row .input { height: 28px; min-width: 0; flex: 1; font: 12px var(--mon
 
 /* While I work on the model, the view steps back a little. */
 .viewer.is-working { opacity: .8; filter: blur(1.5px); }
+
+/* --- camera -------------------------------------------------------------- */
+/* The picture in a thin frame, as large as fits on the screen in the shape the
+   camera gives it (--aspect). Everything to press lies on the picture. */
+.dialog.camera { width: min(900px, 100%, max(300px, calc((100dvh - 42px) * var(--aspect, 1.778)))); padding: 4px; }
+.camera-frame {
+  position: relative;
+  aspect-ratio: var(--aspect, 1.778);
+  max-height: calc(100dvh - 42px);
+  overflow: hidden;
+  background: var(--stage);
+  border-radius: 6px;
+  container-type: size; /* the picture taken is laid out by the size of this box */
+}
+.camera-frame video, .camera-frame canvas { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
+/* The picture taken, exactly where it is drawn: its frame is laid over it. */
+.camera-photo {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 100%;
+  width: min(100cqw, calc(100cqh * var(--photo, 1.778)));
+  aspect-ratio: var(--photo, 1.778);
+  transform: translate(-50%, -50%);
+}
+.camera-frame video.is-mirror { transform: scaleX(-1); }
+.camera-frame .is-off { visibility: hidden; }
+.camera-flash { position: absolute; inset: 0; background: #fff; opacity: 0; pointer-events: none; animation: camera-flash .28s ease-out; }
+@keyframes camera-flash { from { opacity: .75; } to { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .camera-flash { animation: none; } }
+.camera-note {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 24px;
+  text-align: center;
+  font-size: 13px;
+  color: var(--muted-fg);
+}
+.camera-note p { max-width: 40ch; margin: 0; color: var(--fg); }
+
+/* The frame of the picture taken: what is outside it goes dark. Corners and
+   sides are there to be dragged; inside it moves, outside a new one is drawn. */
+.crop { position: absolute; inset: 0; overflow: hidden; cursor: crosshair; touch-action: none; user-select: none; -webkit-user-select: none; }
+.crop-box {
+  position: absolute;
+  border: 1px solid rgba(255, 255, 255, .95);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, .3), 0 0 0 200vmax rgba(0, 0, 0, .52);
+  cursor: move;
+  transition: left .24s ease, top .24s ease, width .24s ease, height .24s ease;
+}
+.crop.is-held .crop-box { transition: none; }
+@media (prefers-reduced-motion: reduce) { .crop-box { transition: none; } }
+.crop-handle { position: absolute; filter: drop-shadow(0 0 1px rgba(0, 0, 0, .55)); }
+.crop-handle::after { content: ''; position: absolute; background: #fff; border-radius: 2px; }
+/* sides: a strip to take hold of, with a short bar in its middle; the marks lie just inside the line,
+   so at the edge of the picture nothing of them is cut off */
+.crop-handle.is-n, .crop-handle.is-s { left: 22px; right: 22px; height: 18px; cursor: ns-resize; }
+.crop-handle.is-w, .crop-handle.is-e { top: 22px; bottom: 22px; width: 18px; cursor: ew-resize; }
+.crop-handle.is-n { top: -9px; }
+.crop-handle.is-s { bottom: -9px; }
+.crop-handle.is-w { left: -9px; }
+.crop-handle.is-e { right: -9px; }
+.crop-handle.is-n::after, .crop-handle.is-s::after { left: 50%; width: 24px; height: 3px; margin-left: -12px; }
+.crop-handle.is-n::after { top: 8px; }
+.crop-handle.is-s::after { bottom: 8px; }
+.crop-handle.is-w::after, .crop-handle.is-e::after { top: 50%; width: 3px; height: 24px; margin-top: -12px; }
+.crop-handle.is-w::after { left: 8px; }
+.crop-handle.is-e::after { right: 8px; }
+/* corners: a square to take hold of, with an angle drawn in it */
+.crop-handle.is-nw, .crop-handle.is-ne, .crop-handle.is-sw, .crop-handle.is-se { width: 30px; height: 30px; }
+.crop-handle.is-nw { left: -9px; top: -9px; cursor: nwse-resize; }
+.crop-handle.is-ne { right: -9px; top: -9px; cursor: nesw-resize; }
+.crop-handle.is-se { right: -9px; bottom: -9px; cursor: nwse-resize; }
+.crop-handle.is-sw { left: -9px; bottom: -9px; cursor: nesw-resize; }
+.crop-handle.is-nw::after, .crop-handle.is-ne::after, .crop-handle.is-se::after, .crop-handle.is-sw::after { width: 18px; height: 18px; background: none; border: 3px solid #fff; border-radius: 0; }
+.crop-handle.is-nw::after { left: 8px; top: 8px; border-right: 0; border-bottom: 0; }
+.crop-handle.is-ne::after { right: 8px; top: 8px; border-left: 0; border-bottom: 0; }
+.crop-handle.is-se::after { right: 8px; bottom: 8px; border-left: 0; border-top: 0; }
+.crop-handle.is-sw::after { left: 8px; bottom: 8px; border-right: 0; border-top: 0; }
+/* While the frame is dragged, what lies on the picture steps aside. */
+.camera-top, .camera-bar { transition: opacity .12s; }
+.camera-frame.is-cropping .camera-top, .camera-frame.is-cropping .camera-bar { opacity: 0; }
+.camera-frame.is-cropping .camera-top > *, .camera-frame.is-cropping .camera-bar > * { pointer-events: none; }
+
+/* On the picture: which camera and the way out at the top, the shutter at the
+   bottom in the middle, the focus beside it when the camera lets it be set. */
+.camera-top, .camera-bar { position: absolute; left: 0; right: 0; display: flex; align-items: center; gap: 8px; padding: 10px; pointer-events: none; }
+.camera-top { top: 0; }
+.camera-bar { bottom: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); padding: 7px 10px; } /* low: clear of the frame a new photo gets */
+.camera-top > *, .camera-bar > * { pointer-events: auto; }
+.camera-top > .grow { pointer-events: none; }
+/* What lies on the picture has its own ground and a thin line around it. */
+.camera-frame .select, .camera-close, .camera-focus, .camera-actions .btn:not(.btn-primary) {
+  background-color: var(--glass);
+  border: 1px solid var(--border);
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
+}
+.camera-frame .select { flex: 0 1 auto; min-width: 0; max-width: 220px; height: 30px; text-overflow: ellipsis; }
+.camera-frame .select:hover, .camera-close:hover, .camera-actions .btn:not(.btn-primary):hover { background-color: var(--bg); }
+.camera-close { display: grid; place-items: center; flex: none; width: 30px; height: 30px; padding: 0; color: var(--fg); border-radius: 50%; }
+.camera-close svg { width: 14px; height: 14px; }
+.shutter { grid-column: 2; height: 36px; padding: 0 20px 0 16px; gap: 8px; font-size: 14px; border-radius: 999px; box-shadow: var(--shadow); }
+.shutter svg { width: 18px; height: 18px; }
+.shutter:disabled { opacity: .6; }
+.camera-actions { grid-column: 1 / -1; display: flex; justify-content: center; gap: 8px; }
+.camera-actions .btn { height: 36px; padding: 0 18px; font-size: 14px; border-radius: 999px; box-shadow: var(--shadow); }
+.camera-actions .btn svg { width: 16px; height: 16px; }
+.camera-focus { grid-column: 3; justify-self: end; display: flex; align-items: center; gap: 8px; min-width: 0; padding: 3px 3px 3px 10px; font-size: 12px; color: var(--muted-fg); border-radius: var(--radius); }
+.camera-focus input { flex: 0 1 110px; min-width: 48px; margin: 0; accent-color: var(--primary); }
+.camera-focus input.is-auto { opacity: .45; }
+.camera-focus .btn { flex: none; }
+/* A narrow window: the focus on a row of its own, above the shutter. */
+@media (max-width: 600px) {
+  .camera-bar { grid-template-columns: minmax(0, 1fr); justify-items: center; }
+  .shutter, .camera-focus { grid-column: 1; }
+  .camera-focus { grid-row: 1; justify-self: end; }
+  .camera-focus > span { display: none; }
+}
+
+/* Among the suggestions of an empty conversation: something to do, not a prompt to send. */
+.suggestion.is-action { display: flex; align-items: center; gap: 8px; }
+.suggestion.is-action svg { width: 15px; height: 15px; flex: none; color: var(--muted-fg); }
+
+/* A name edited where it stands: the field takes the place of the name, its text where the name's was. */
+.name-edit { min-width: 0; padding: 0 6px; font-weight: 500; }
+.crumbs .name-edit { flex: 0 1 200px; height: 28px; padding: 0 5px; font-size: 13px; }
+.model-tab.is-form { gap: 10px; }
+.model-tab.is-form .name-edit { margin-left: -7px; }
+.project-row.is-form:hover { background: none; }
+.project-row.is-form .project-row-open { cursor: default; }
+.project-row.is-form .name-edit { flex: 1 1 auto; max-width: 420px; height: 32px; margin-left: -7px; }

@@ -88,7 +88,7 @@ let state = {
   model: null,         // the Claude model for the next prompt; every session starts on the default
   options: { dims: true, refs: false, scans: false, grid: true, code: false },
   scanOpen: null,      // the STL picked in the list: shown alone, in place of the model
-  dialog: null,        // null | { kind: 'rename' | 'duplicate', projectId } | { kind: 'confirm', ... }
+  dialog: null,        // null | { kind: 'duplicate', projectId } | { kind: 'confirm', ... } | { kind: 'camera', sketch }
   spot: null,          // a point on the model picked with the right mouse button, while its prompt is open
   toasts: [],
   dragging: false,
@@ -264,18 +264,20 @@ async function uploadScan(projectId, file) {
   return reply(await fetch(scanPath(projectId, file.name), { method: 'PUT', body: file }));
 }
 
-/** Add meshes to the open project as scans to reverse engineer. */
+/** Add meshes to the open project as scans to reverse engineer. Resolves to the names they got. */
 async function addScans(files) {
   const id = state.projectId;
-  if (!id || !files.length) return;
+  const names = [];
+  if (!id || !files.length) return names;
   setState((s) => ({ uploading: s.uploading + files.length }));
   for (const file of files) {
     await attempt(async () => {
-      await uploadScan(id, file);
+      names.push((await uploadScan(id, file)).name);
       toast(t('STL added'));
     });
     setState((s) => ({ uploading: s.uploading - 1 }));
   }
+  return names;
 }
 
 /** Show one of the project's models with its conversation. */
@@ -507,6 +509,8 @@ const ICONS = {
   external: '<path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>',
   undo: '<path d="M3 7v6h6"/><path d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3L3 13"/>',
   clip: '<path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/>',
+  camera: '<path d="M14.5 3h-5L7 6H4a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-3l-2.5-3z"/><circle cx="12" cy="13.5" r="3.5"/>',
+  picture: '<rect width="18" height="18" x="3" y="3" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.09-3.09a2 2 0 0 0-2.82 0L6 21"/>',
   up: '<path d="m5 12 7-7 7 7"/><path d="M12 19V5"/>',
   stop: '<rect width="12" height="12" x="6" y="6" rx="2" fill="currentColor"/>',
   ruler: '<path d="M21.3 15.3a2.4 2.4 0 0 1 0 3.4l-2.6 2.6a2.4 2.4 0 0 1-3.4 0L2.7 8.7a2.41 2.41 0 0 1 0-3.4l2.6-2.6a2.41 2.41 0 0 1 3.4 0Z"/><path d="m14.5 12.5 2-2"/><path d="m11.5 9.5 2-2"/><path d="m8.5 6.5 2-2"/><path d="m17.5 15.5 2-2"/>',
@@ -648,54 +652,57 @@ function DuplicateDialog({ projectId }) {
   <//>`;
 }
 
-function RenameProjectDialog({ projectId }) {
-  const [name, setName] = useState(projectId);
-  const field = useRef(null);
-  useEffect(() => field.current?.select(), []);
-  const form = useSubmit(async () => {
-    const { id } = await api(`/projects/${projectId}/rename`, { name: name.trim() });
-    await refreshProjects();
-    if (projectId === state.projectId && id !== projectId) await openProject(id, state.unpicked ? null : state.project?.file ?? null);
-  });
-  return html`<${Dialog} title=${t('Rename project')} lead=${t('Its folder will be renamed too.')}>
-    <form onSubmit=${form.submit}>
-      <label for="project-name">${t('Name')}</label>
-      <input id="project-name" ref=${field} class="input" value=${name} onInput=${(e) => setName(e.target.value)} />
-      ${form.problem && html`<div class="problem">${form.problem}</div>`}
-      <div class="dialog-actions">
-        <button type="button" class="btn" onClick=${closeDialog}>${t('Cancel')}</button>
-        <button type="submit" class="btn btn-primary" disabled=${!name.trim() || form.busy}>${form.busy ? t('Renaming…') : t('Rename')}</button>
-      </div>
-    </form>
-  <//>`;
+/** Another name for a project; its folder is renamed with it. */
+async function renameProject(projectId, name) {
+  const { id } = await api(`/projects/${projectId}/rename`, { name });
+  await refreshProjects();
+  if (projectId === state.projectId && id !== projectId) await openProject(id, state.unpicked ? null : state.project?.file ?? null);
 }
 
-// Another name for the model or the STL that is open.
-function RenameFileDialog({ file, scan }) {
+/** Another name for a model or an STL of the open project. */
+async function renameFile(file, name, scan = false) {
   const id = state.projectId;
-  const [name, setName] = useState(file.replace(/\.(py|stl)$/i, ''));
+  if (scan) {
+    const renamed = await fetch(`${scanPath(id, file)}/rename`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ to: name }) }).then(reply);
+    if (state.scanOpen === file) setState({ scanOpen: renamed.name });
+    return;
+  }
+  const renamed = await api(`/projects/${id}/files/${encodeURIComponent(file)}/rename`, { to: name });
+  if (file === state.project?.file) await openFile(renamed.file);
+}
+
+// A name edited where it stands. Enter or a click elsewhere keeps the new name,
+// Escape the old one. A name that is refused stays open to be corrected.
+function NameEdit({ value, hint, onSave, onClose }) {
+  const [text, setText] = useState(value);
+  const [busy, setBusy] = useState(false);
   const field = useRef(null);
-  useEffect(() => field.current?.select(), []);
-  const form = useSubmit(async () => {
-    if (scan) {
-      const renamed = await fetch(`${scanPath(id, file)}/rename`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ to: name.trim() }) }).then(reply);
-      if (state.scanOpen === file) setState({ scanOpen: renamed.name });
-      return;
-    }
-    const renamed = await api(`/projects/${id}/files/${encodeURIComponent(file)}/rename`, { to: name.trim() });
-    if (file === state.project?.file) await openFile(renamed.file);
-  });
-  return html`<${Dialog} title=${scan ? t('Rename STL') : t('Rename model')}>
-    <form onSubmit=${form.submit}>
-      <label for="file-name">${t('Name')}</label>
-      <input id="file-name" ref=${field} class="input" value=${name} onInput=${(e) => setName(e.target.value)} />
-      ${form.problem && html`<div class="problem">${form.problem}</div>`}
-      <div class="dialog-actions">
-        <button type="button" class="btn" onClick=${closeDialog}>${t('Cancel')}</button>
-        <button type="submit" class="btn btn-primary" disabled=${!name.trim() || form.busy}>${form.busy ? t('Renaming…') : t('Rename')}</button>
-      </div>
-    </form>
-  <//>`;
+  const closed = useRef(false);
+  // At once, before anything is drawn: what is typed next goes into the field.
+  useLayoutEffect(() => {
+    field.current?.focus();
+    field.current?.select();
+  }, []);
+  const finish = async (keep, left = false) => {
+    if (closed.current) return;
+    const name = text.trim();
+    closed.current = true;
+    if (!keep || !name || name === value) return onClose();
+    setBusy(true);
+    if (await attempt(() => onSave(name)) || left) return onClose();
+    closed.current = false;
+    setBusy(false);
+    field.current?.focus();
+    return undefined;
+  };
+  return html`<input ref=${field} class="input name-edit" value=${text} aria-label=${t('New name')} title=${hint} readOnly=${busy} spellcheck=${false}
+    onInput=${(event) => setText(event.target.value)} onClick=${(event) => event.stopPropagation()} onBlur=${() => finish(true, true)}
+    onKeyDown=${(event) => {
+      if (event.key !== 'Enter' && event.key !== 'Escape') return;
+      event.preventDefault();
+      event.stopPropagation();
+      finish(event.key === 'Enter');
+    }} />`;
 }
 
 function ConfirmDialog({ title, lead, label, action }) {
@@ -709,9 +716,397 @@ function ConfirmDialog({ title, lead, label, action }) {
   <//>`;
 }
 
+// --- camera ------------------------------------------------------------------
+
+// A photo taken here goes with the next prompt like any other attachment: a
+// sketch on paper, the part something has to fit, a drawing.
+const CAN_SHOOT = !!navigator.mediaDevices?.getUserMedia;
+const PHOTO_EDGE = 2048;       // the longer side of a photo, at most
+const CAMERA_KEY = 'camera';   // the camera picked last time
+const FOCUS_KEY = 'cameraFocus'; // per camera: where its lens is held, when not left to the camera
+const ASPECT_KEY = 'cameraAspect'; // the shape of the picture last time: the window opens in it
+const PHOTO_SIZE = { width: { ideal: 1920 }, height: { ideal: 1080 } };
+
+function kept(key) {
+  try { return localStorage.getItem(key); } catch { return null; }
+}
+function keep(key, value) {
+  try { value ? localStorage.setItem(key, value) : localStorage.removeItem(key); } catch { /* not kept */ }
+}
+
+function cameraProblem(err) {
+  switch (err?.name) {
+    case 'NotAllowedError':
+    case 'SecurityError':
+      return t('The camera is blocked. Allow it for this page (the icon in the address bar), then try again.');
+    case 'NotFoundError':
+    case 'OverconstrainedError':
+      return t('No camera was found.');
+    case 'NotReadableError':
+    case 'AbortError':
+      return t('The camera is in use by another program.');
+    default:
+      return t('The camera could not be started.');
+  }
+}
+
+// What a camera lets the page do about its focus: `auto` is the mode in which
+// it focuses by itself, `range` the distances its lens can be held at. Few
+// cameras tell, and only to some browsers; the others focus as they please.
+function focusOf(track) {
+  const can = track.getCapabilities?.() ?? {};
+  const modes = can.focusMode ?? [];
+  const range = can.focusDistance;
+  return {
+    auto: ['continuous', 'single-shot'].find((mode) => modes.includes(mode)) ?? null,
+    range: modes.includes('manual') && range && range.max > range.min ? range : null,
+  };
+}
+
+// The lens held at `distance`, or left to the camera again (null).
+function focusAt(track, auto, distance) {
+  const how = distance == null ? { focusMode: auto } : { focusMode: 'manual', focusDistance: distance };
+  return track.applyConstraints({ ...PHOTO_SIZE, advanced: [how] }).catch(() => {});
+}
+
+// "FaceTime HD Camera (3A71:F4B5)" is the camera's name and its USB id.
+const cameraName = (device, index) => device.label.replace(/\s*\([0-9a-f]{4}:[0-9a-f]{4}\)$/i, '') || t('Camera {number}', { number: index + 1 });
+
+const CROP = { x: 0.1, y: 0.1, w: 0.8, h: 0.8 }; // the frame a new photo gets: its middle, as parts of its sides
+const WHOLE = { x: 0, y: 0, w: 1, h: 1 };
+const CROP_MIN = 0.08;                            // the shortest side a frame can have
+
+// The frame a new photo gets, where the picture is shown: its middle — and, in a
+// small window, no further up or down than the buttons that lie on the picture.
+function middleFrame(frame) {
+  const box = frame?.querySelector('.camera-photo')?.getBoundingClientRect();
+  const top = frame?.querySelector('.camera-top')?.getBoundingClientRect();
+  const bar = frame?.querySelector('.camera-bar')?.getBoundingClientRect();
+  if (!box?.height || !top || !bar) return CROP;
+  const from = Math.min(0.3, Math.max(CROP.y, (top.bottom - box.top) / box.height));
+  const to = Math.max(0.7, Math.min(CROP.y + CROP.h, (bar.top - box.top) / box.height));
+  return { ...CROP, y: from, h: to - from };
+}
+
+// The frame of a photo: the part of it that is kept. Its corners and sides are
+// dragged to size it, its inside to move it; a drag outside it draws a new one,
+// and a double click takes the whole photo (or the middle again).
+function CropBox({ value, onChange, onHold }) {
+  const area = useRef(null);
+  const middle = () => middleFrame(area.current?.closest('.camera-frame'));
+  const drag = useRef(null);
+  const part = (event, rect) => ({ x: (event.clientX - rect.left) / rect.width, y: (event.clientY - rect.top) / rect.height });
+  const within = (n, low, high) => Math.min(high, Math.max(low, n));
+  // From where the drag began to where the pointer is, inside the photo and never too short.
+  const span = (anchor, to) => {
+    const a = within(anchor, 0, 1);
+    const b = within(to, 0, 1);
+    let low = Math.min(a, b);
+    let high = Math.max(a, b);
+    if (high - low < CROP_MIN) {
+      if (b >= a) { high = Math.min(1, low + CROP_MIN); low = high - CROP_MIN; }
+      else { low = Math.max(0, high - CROP_MIN); high = low + CROP_MIN; }
+    }
+    return [low, high];
+  };
+  const start = (mode) => (event) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const rect = area.current.getBoundingClientRect();
+    drag.current = { mode, rect, from: part(event, rect), was: value, drawn: false };
+    area.current.setPointerCapture(event.pointerId);
+    area.current.classList.add('is-held'); // at once: the frame follows the pointer without easing
+    onHold(true);
+  };
+  const move = (event) => {
+    const held = drag.current;
+    if (!held) return;
+    const { mode, rect, from, was } = held;
+    const at = part(event, rect);
+    let left = was.x;
+    let top = was.y;
+    let right = was.x + was.w;
+    let bottom = was.y + was.h;
+    if (mode === 'move') {
+      left = within(was.x + at.x - from.x, 0, 1 - was.w);
+      top = within(was.y + at.y - from.y, 0, 1 - was.h);
+      right = left + was.w;
+      bottom = top + was.h;
+    } else if (mode === 'draw') {
+      // A press alone changes nothing: the new frame begins once the pointer has travelled a little.
+      if (!held.drawn && Math.hypot((at.x - from.x) * rect.width, (at.y - from.y) * rect.height) < 4) return;
+      held.drawn = true;
+      [left, right] = span(from.x, at.x);
+      [top, bottom] = span(from.y, at.y);
+    } else {
+      // A side follows the pointer from where it was taken hold of, and stops short of the opposite one.
+      if (mode.includes('w')) left = within(was.x + at.x - from.x, 0, right - CROP_MIN);
+      if (mode.includes('e')) right = within(was.x + was.w + at.x - from.x, left + CROP_MIN, 1);
+      if (mode.includes('n')) top = within(was.y + at.y - from.y, 0, bottom - CROP_MIN);
+      if (mode.includes('s')) bottom = within(was.y + was.h + at.y - from.y, top + CROP_MIN, 1);
+    }
+    onChange({ x: left, y: top, w: right - left, h: bottom - top });
+  };
+  const end = () => {
+    if (!drag.current) return;
+    drag.current = null;
+    area.current?.classList.remove('is-held');
+    onHold(false);
+  };
+  // Taken away in the middle of a drag (the picture was taken with a key): the buttons come back.
+  useEffect(() => () => onHold(false), []);
+  const whole = value.w > 0.999 && value.h > 0.999;
+  const percent = (n) => `${(n * 100).toFixed(3)}%`;
+  // The pointer is held by the whole area, so that is where a double click arrives. A press
+  // on the picture leaves the focus where it was: on the button that Space or Enter presses.
+  return html`<div class="crop" ref=${area} onPointerDown=${start('draw')} onPointerMove=${move} onPointerUp=${end} onPointerCancel=${end} onLostPointerCapture=${end}
+    onMouseDown=${(event) => event.preventDefault()} onDblClick=${() => onChange(whole ? middle() : WHOLE)}>
+    <div class="crop-box" style=${{ left: percent(value.x), top: percent(value.y), width: percent(value.w), height: percent(value.h) }}
+      title=${t('Drag to move the frame. Double click: the whole photo')} onPointerDown=${start('move')}>
+      ${['n', 'e', 's', 'w', 'nw', 'ne', 'se', 'sw'].map((side) => html`<span class=${`crop-handle is-${side}`} key=${side} onPointerDown=${start(side)} />`)}
+    </div>
+  </div>`;
+}
+
+// The camera, live; one press takes the picture, a second one uses it. Live, the
+// picture is a mirror, so that a sheet held up to the camera moves the way the
+// hand does; the picture that is taken is the real one, with its text readable.
+// A frame lies on the picture, before it is taken and after: what is inside it
+// is kept. Everything to press lies on the picture itself.
+function CameraDialog({ onUse }) {
+  const video = useRef(null);
+  const still = useRef(null);   // the picture that was taken, as the camera gave it
+  const shutter = useRef(null);
+  const accept = useRef(null);
+  const [phase, setPhase] = useState('starting'); // starting | live | shot | failed
+  const [problem, setProblem] = useState('');
+  const [round, again] = useReducer((n) => n + 1, 0);
+  const [wanted, setWanted] = useState(() => kept(CAMERA_KEY));
+  const [cameras, setCameras] = useState([]);
+  const [active, setActive] = useState('');
+  // The window has the shape of the picture from the start, so it does not change size when
+  // the camera comes on: the shape seen last time, or the one most cameras have.
+  const [aspect, setAspect] = useState(() => {
+    const last = Number.parseFloat(kept(ASPECT_KEY));
+    return last > 0.3 && last < 4 ? last : 16 / 9;
+  });
+  const [mirror, setMirror] = useState(true); // not for a camera that looks away from the person
+  const shotAt = useRef(0);
+  const [photo, setPhoto] = useState(16 / 9); // the shape of the picture taken
+  const [crop, setCrop] = useState(WHOLE);    // the part of the picture that is kept, in the picture's own terms
+  const [held, setHeld] = useState(false);    // while the frame is being dragged, the buttons step aside
+  const framed = useRef(false);
+  const lens = useRef(null);    // the camera in use, for its focus: { track, id, auto, next, busy }
+  const [focus, setFocus] = useState(null); // null: not ours to set | { auto, range, manual, distance }
+
+  useEffect(() => {
+    let media = null;
+    let gone = false;
+    const list = async () => {
+      const devices = await navigator.mediaDevices.enumerateDevices().catch(() => []);
+      if (!gone) setCameras(devices.filter((device) => device.kind === 'videoinput' && device.deviceId));
+    };
+    const fail = (err) => {
+      setProblem(cameraProblem(err));
+      setPhase((was) => (was === 'shot' ? was : 'failed')); // a picture already taken stays
+    };
+    setPhase('starting');
+    setActive('');
+    setFocus(null);
+    navigator.mediaDevices.getUserMedia({
+      audio: false,
+      video: { ...PHOTO_SIZE, ...(wanted ? { deviceId: { exact: wanted } } : { facingMode: 'environment' }) },
+    }).then(async (stream) => {
+      media = stream;
+      if (gone) return stream.getTracks().forEach((track) => track.stop());
+      const [track] = stream.getVideoTracks();
+      track?.addEventListener('ended', () => { if (!gone) fail(); }); // unplugged
+      video.current.srcObject = stream;
+      await video.current.play().catch(() => {});
+      if (gone) return undefined;
+      const id = track?.getSettings().deviceId ?? '';
+      setActive(id);
+      setMirror(track?.getSettings().facingMode !== 'environment');
+      setPhase('live');
+      // Focus: by itself where the camera can, unless its lens was set by hand the last time.
+      const { auto, range } = track ? focusOf(track) : {};
+      if (auto || range) {
+        const held = range ? Number.parseFloat(kept(`${FOCUS_KEY}:${id}`)) : NaN;
+        const manual = Number.isFinite(held) || !auto;
+        const distance = Number.isFinite(held) ? Math.min(range.max, Math.max(range.min, held)) : track.getSettings().focusDistance ?? range?.min;
+        lens.current = { track, id, auto };
+        if (range) setFocus({ auto, range, manual, distance });
+        if (auto || Number.isFinite(held)) focusAt(track, auto, Number.isFinite(held) ? distance : null);
+      }
+      return list();
+    }).catch((err) => {
+      if (gone) return;
+      // The camera picked last time is not there any more: whichever there is, then.
+      if (wanted && (err?.name === 'OverconstrainedError' || err?.name === 'NotFoundError')) {
+        keep(CAMERA_KEY, null);
+        setWanted(null);
+        return;
+      }
+      fail(err);
+      list();
+    });
+    return () => {
+      gone = true;
+      lens.current = null;
+      media?.getTracks().forEach((track) => track.stop());
+      if (video.current) video.current.srcObject = null;
+    };
+  }, [wanted, round]);
+
+  // The key that comes next is always under the finger: Space takes, Enter uses.
+  useEffect(() => { (phase === 'shot' ? accept : shutter).current?.focus(); }, [phase]);
+  // When the picture first comes on, the frame closes in from its edges: that shows it is there, and can be moved.
+  useEffect(() => {
+    if (phase !== 'live' || framed.current) return;
+    framed.current = true;
+    requestAnimationFrame(() => requestAnimationFrame(() => setCrop(middleFrame(video.current?.closest('.camera-frame')))));
+  }, [phase]);
+
+  const shoot = () => {
+    const node = video.current;
+    if (phase !== 'live' || !node?.videoWidth) return;
+    const scale = Math.min(1, PHOTO_EDGE / Math.max(node.videoWidth, node.videoHeight));
+    const canvas = still.current;
+    canvas.width = Math.round(node.videoWidth * scale);
+    canvas.height = Math.round(node.videoHeight * scale);
+    canvas.getContext('2d').drawImage(node, 0, 0, canvas.width, canvas.height);
+    shotAt.current = performance.now();
+    setPhoto(canvas.width / canvas.height);
+    setPhase('shot');
+  };
+  // The second click of a double click on the shutter lands on what replaces it: not meant.
+  const hasty = (event) => event?.detail > 0 && performance.now() - shotAt.current < 400;
+  const use = (event) => {
+    const taken = still.current;
+    if (phase !== 'shot' || !taken) return;
+    if (hasty(event)) return;
+    // What is inside the frame, in the picture's own pixels.
+    const x = Math.round(crop.x * taken.width);
+    const y = Math.round(crop.y * taken.height);
+    const w = Math.max(1, Math.min(taken.width - x, Math.round(crop.w * taken.width)));
+    const h = Math.max(1, Math.min(taken.height - y, Math.round(crop.h * taken.height)));
+    const out = Object.assign(document.createElement('canvas'), { width: w, height: h });
+    out.getContext('2d').drawImage(taken, x, y, w, h, 0, 0, w, h);
+    const data = out.toDataURL('image/jpeg', 0.9).split(',')[1] ?? '';
+    closeDialog();
+    onUse({ type: 'image/jpeg', size: Math.floor(data.length * 3 / 4), data });
+  };
+  const retake = (event) => {
+    if (hasty(event)) return;
+    // Back to the live picture; a camera that went away meanwhile is started again.
+    if (video.current?.srcObject?.getVideoTracks()[0]?.readyState === 'live') setPhase('live');
+    else again();
+  };
+  // The lens to a distance picked on the slider, or back to the camera (null). A slider
+  // says a lot at once; the camera is told one thing at a time, the latest.
+  const focusTo = (distance) => {
+    const job = lens.current;
+    if (!job) return;
+    setFocus((was) => was && { ...was, manual: distance != null, distance: distance ?? was.distance });
+    keep(`${FOCUS_KEY}:${job.id}`, distance == null ? null : String(distance));
+    job.next = { distance };
+    if (job.busy) return;
+    job.busy = true;
+    (async () => {
+      while (job.next) {
+        const { distance: to } = job.next;
+        job.next = null;
+        await focusAt(job.track, job.auto, to);
+      }
+      job.busy = false;
+    })();
+  };
+  // Automatic focus on and off; off holds the lens where the camera had it.
+  const autofocus = () => focusTo(focus.manual ? null : lens.current?.track.getSettings().focusDistance ?? focus.distance);
+  const pick = (id) => {
+    keep(CAMERA_KEY, id);
+    setWanted(id);
+  };
+
+  const keys = useRef(null);
+  keys.current = (event) => {
+    if (event.metaKey || event.ctrlKey || event.altKey) return;
+    if (event.key === 'Escape') return closeDialog();
+    // Space and Enter belong to the button that has the focus; with none, to the step that comes next.
+    if ((event.key === ' ' || event.key === 'Enter') && !event.target.closest?.('button, select')) {
+      event.preventDefault();
+      if (phase === 'shot') use();
+      else shoot();
+    }
+  };
+  useEffect(() => {
+    const onKey = (event) => keys.current(event);
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, []);
+
+  const size = (event) => {
+    const { videoWidth, videoHeight } = event.target;
+    if (!videoWidth || !videoHeight) return;
+    setAspect(videoWidth / videoHeight);
+    keep(ASPECT_KEY, (videoWidth / videoHeight).toFixed(4));
+  };
+  const chosen = active || wanted || ''; // in the list: the camera in use, or the one being started
+  // The live picture is a mirror, the frame is kept in the terms of the real one: left and right swap on the way.
+  const mirrored = mirror && phase !== 'shot';
+  const swap = (frame) => (mirrored ? { ...frame, x: 1 - frame.x - frame.w } : frame);
+
+  return html`<div class="overlay" onMouseDown=${(event) => { if (event.target === event.currentTarget) closeDialog(); }}>
+    <div class="dialog camera" role="dialog" aria-modal="true" aria-label=${t('Take a photo')} style=${`--aspect:${aspect}`}>
+      <div class=${`camera-frame ${held ? 'is-cropping' : ''}`}>
+        <video ref=${video} class=${`${phase === 'live' || phase === 'shot' ? '' : 'is-off'} ${mirror ? 'is-mirror' : ''}`} playsInline muted autoPlay
+          onLoadedMetadata=${size} onResize=${size} />
+        <div class="camera-photo" style=${`--photo:${phase === 'shot' ? photo : aspect}`}>
+          <canvas ref=${still} class=${phase === 'shot' ? '' : 'is-off'} />
+          ${(phase === 'live' || phase === 'shot') && html`<${CropBox} key=${phase} value=${swap(crop)} onChange=${(frame) => setCrop(swap(frame))} onHold=${setHeld} />`}
+        </div>
+        ${phase === 'shot' && html`<span class="camera-flash" />`}
+        ${phase === 'starting' && html`<div class="camera-note" role="status"><span class="spinner" />${t('Starting the camera…')}</div>`}
+        ${phase === 'failed' && html`<div class="camera-note" role="alert">
+          <p>${problem}</p>
+          <button type="button" class="btn" onClick=${again}>${t('Try again')}</button>
+        </div>`}
+        <div class="camera-top">
+          ${cameras.length > 1 && phase !== 'shot' && html`<select class="select" aria-label=${t('Camera')} title=${t('Camera')} value=${chosen}
+            onChange=${(event) => pick(event.target.value)}>
+            ${!cameras.some((device) => device.deviceId === chosen) && html`<option value=${chosen} key="none" disabled hidden>${t('Camera')}</option>`}
+            ${cameras.map((device, index) => html`<option value=${device.deviceId} key=${device.deviceId}>${cameraName(device, index)}</option>`)}
+          </select>`}
+          <span class="grow" />
+          <button type="button" class="camera-close" title=${t('Close')} aria-label=${t('Close')} onClick=${closeDialog}><${Icon} name="x" /></button>
+        </div>
+        ${phase === 'shot' && html`<div class="camera-bar">
+          <div class="camera-actions">
+            <button type="button" class="btn" onClick=${retake}>${t('Retake')}</button>
+            <button type="button" class="btn btn-primary" ref=${accept} onClick=${use}><${Icon} name="check" />${t('Use photo')}</button>
+          </div>
+        </div>`}
+        ${(phase === 'live' || phase === 'starting') && html`<div class="camera-bar">
+          <button type="button" class="btn btn-primary shutter" ref=${shutter} title=${t('Take the photo (Space)')}
+            disabled=${phase !== 'live'} onClick=${shoot}><${Icon} name="camera" />${t('Take the photo')}</button>
+          ${focus && phase === 'live' && html`<div class="camera-focus">
+            <span id="camera-focus">${t('Focus')}</span>
+            <input type="range" aria-labelledby="camera-focus" class=${focus.manual ? '' : 'is-auto'} min=${focus.range.min} max=${focus.range.max}
+              step=${focus.range.step || 'any'} value=${focus.distance} onInput=${(event) => focusTo(Number(event.target.value))} />
+            ${focus.auto && html`<button type="button" class=${`btn btn-sm ${focus.manual ? '' : 'is-on'}`} title=${t('Automatic focus')}
+              aria-pressed=${String(!focus.manual)} onClick=${autofocus}>${t('Auto')}</button>`}
+          </div>`}
+        </div>`}
+      </div>
+    </div>
+  </div>`;
+}
+
 // --- left side: projects, conversation, history ------------------------------
 
 const IMAGE_FILE = /\.(png|jpe?g|webp|gif)$/i;
+const PICTURE_TYPES = 'image/png,image/jpeg,image/webp,image/gif'; // the pictures the model can look at
 
 // A spot picked on the model, in words.
 function spotText(spot) {
@@ -825,16 +1220,20 @@ function invitation(project) {
       suggestions: [only ? t(SUGGESTIONS.scan[0]) : t('Recreate {name} as a parametric model', { name: project.scans[0].name }), t(SUGGESTIONS.scan[1])],
     };
   }
+  // Words are one way to say it; an STL to recreate (where it can be measured), a drawing or a photo are others.
+  const scan = state.info?.engine?.scan === true;
   return {
     title: t('What should be made?'),
+    scan,
+    sketch: true,
     text: project.scans.length
       ? t('I cannot measure STL files in this installation, so describe the object: dimensions, holes, what it has to fit.')
       : t('Describe the object: dimensions, holes, what it has to fit. I will make a model that you can then change with further prompts.'),
-    suggestions: SUGGESTIONS.blank.map((text) => t(text)),
+    suggestions: (scan ? SUGGESTIONS.blank.slice(0, 1) : SUGGESTIONS.blank).map((text) => t(text)),
   };
 }
 
-function Timeline({ project, now, models, onSuggest }) {
+function Timeline({ project, now, models, onSuggest, onCamera, onPicture, onScan }) {
   const ref = useRef(null);
   const stick = useRef(true);
   // A turn shows here when it is about the open model (or the model it is creating).
@@ -864,6 +1263,15 @@ function Timeline({ project, now, models, onSuggest }) {
       <h3>${invite.title}</h3>
       <p>${invite.text}</p>
       ${invite.suggestions.map((text) => html`<button type="button" class="suggestion" key=${text} onClick=${() => onSuggest(text)}>${text}</button>`)}
+      ${invite.scan && html`<button type="button" class="suggestion is-action" onClick=${onScan}>
+        <${Icon} name="upload" />${t('Recreate an STL file as a parametric model')}
+      </button>`}
+      ${invite.sketch && CAN_SHOOT && html`<button type="button" class="suggestion is-action" onClick=${() => onCamera(true)}>
+        <${Icon} name="camera" />${t('Take a photo of a sketch')}
+      </button>`}
+      ${invite.sketch && html`<button type="button" class="suggestion is-action" onClick=${onPicture}>
+        <${Icon} name="picture" />${t('Add a photo or a sketch from a file')}
+      </button>`}
     </div>`}
   </div>`;
 }
@@ -979,7 +1387,7 @@ function ModelPicker({ info, model }) {
   </div>`;
 }
 
-function Composer({ project, info, model, draft, setDraft, files, setFiles, dragging, limits, now }) {
+function Composer({ project, info, model, draft, setDraft, files, setFiles, onCamera, dragging, limits, now }) {
   const box = useRef(null);
   const picker = useRef(null);
   const busy = !!project.turn;
@@ -1063,8 +1471,9 @@ function Composer({ project, info, model, draft, setDraft, files, setFiles, drag
         </button>`)}
       </div>`}
       <div class="composer-row">
-        <${IconButton} icon="clip" label=${t('Attach files (pictures, drawings, notes)')} onClick=${() => picker.current.click()} />
-        <input ref=${picker} type="file" multiple hidden onChange=${(e) => { addFiles(e.target.files, files, setFiles); e.target.value = ''; }} />
+        <${IconButton} icon="clip" label=${t('Attach files (pictures, drawings, notes, STL)')} onClick=${() => picker.current.click()} />
+        <input ref=${picker} type="file" multiple hidden onChange=${(e) => { bringFiles(e.target.files, files, setFiles, setDraft); e.target.value = ''; }} />
+        ${CAN_SHOOT && html`<${IconButton} icon="camera" label=${t('Take a photo (a sketch, a part, a drawing)')} onClick=${() => onCamera()} />`}
         <${ModelPicker} info=${info} model=${model} />
         <span class="grow" />
         ${busy
@@ -1075,6 +1484,35 @@ function Composer({ project, info, model, draft, setDraft, files, setFiles, drag
   </div>`;
 }
 
+// STL files added from a conversation are named in its prompt at once, ready to be
+// talked about. One alone, in a model that is still empty, comes with the obvious request.
+function nameScans(names, setDraft) {
+  if (!names.length) return;
+  const { project, info } = state;
+  setDraft((was) => {
+    if (!was.trim() && names.length === 1 && info?.engine?.scan && !project?.good?.ok) return t('Recreate @{name} as a parametric model', { name: names[0] });
+    return `${was}${was && !/\s$/.test(was) ? ' ' : ''}${names.map((name) => `@${name}`).join(' ')} `;
+  });
+  requestAnimationFrame(() => {
+    const box = document.querySelector('.composer textarea');
+    box?.focus();
+    box?.setSelectionRange(box.value.length, box.value.length);
+  });
+}
+
+// Files brought into a conversation. An STL joins the STL files of the project and
+// is named in the prompt; anything else goes with the prompt as an attachment.
+async function bringFiles(list, files, setFiles, setDraft) {
+  const picked = [...list];
+  const meshes = picked.filter(isScanFile);
+  const rest = picked.filter((file) => !isScanFile(file));
+  if (rest.length) addFiles(rest, files, setFiles);
+  if (!meshes.length) return;
+  if (state.project?.turn) toast(t('Wait until I finish'), { error: true });
+  else nameScans(await addScans(meshes), setDraft);
+}
+
+// Files picked or dropped join those of the next prompt. Resolves to how many were taken.
 async function addFiles(list, files, setFiles) {
   const picked = [...list];
   const tooBig = picked.find((file) => file.size > MAX_FILE_BYTES);
@@ -1083,8 +1521,10 @@ async function addFiles(list, files, setFiles) {
   if (picked.length > fits.length && !tooBig) toast(t('At most {count} files', { count: MAX_FILES }), { error: true });
   try {
     setFiles([...files, ...(await Promise.all(fits.map(readFile)))]);
+    return fits.length;
   } catch (err) {
     toast(err.message, { error: true });
+    return 0;
   }
 }
 
@@ -1123,6 +1563,27 @@ function Side({ s, draft, setDraft, files, setFiles }) {
     setDraft(text);
     document.querySelector('.composer textarea')?.focus();
   };
+  // The camera, for a photo that goes with the next prompt; of a sketch, when that is what was offered.
+  const camera = (sketch = false) => {
+    if (files.length >= MAX_FILES) toast(t('At most {count} files', { count: MAX_FILES }), { error: true });
+    else setState({ dialog: { kind: 'camera', sketch } });
+  };
+  // A photo or a sketch from the disk, with its request ready to send or to add to.
+  const picture = () => {
+    const input = Object.assign(document.createElement('input'), { type: 'file', accept: PICTURE_TYPES, multiple: true });
+    input.addEventListener('change', async () => {
+      if (!(await addFiles(input.files, files, setFiles))) return;
+      setDraft((was) => (was.trim() ? was : t('Make a model from the attachment')));
+      requestAnimationFrame(() => document.querySelector('.composer textarea')?.focus());
+    });
+    input.click();
+  };
+  // An STL from the disk: it joins the project's STL files and its request waits in the prompt.
+  const scanFile = () => {
+    const input = Object.assign(document.createElement('input'), { type: 'file', accept: '.stl', multiple: true });
+    input.addEventListener('change', () => bringFiles(input.files, files, setFiles, setDraft));
+    input.click();
+  };
   const tab = project?.file ? s.tab : 'chat';
   // The models as a stack of tabs: the list of them, or one of them open with
   // its conversation underneath. A project with no model has nothing to open.
@@ -1146,6 +1607,9 @@ function Side({ s, draft, setDraft, files, setFiles }) {
     }
   }, [listing, project?.file]);
   const meta = s.peek ? s.peek.meta : project?.good ?? null;
+  // The name at the end of the path is edited where it stands: the open model or STL, or the project.
+  const named = project && !listing ? `${scan ? 'scan' : 'file'}:${scan ? scan.name : project.file}` : `project:${s.projectId}`;
+  const [naming, setNaming] = useState(null); // which name is being edited, as in `named`
   return html`<aside class="side" ref=${side}>
     <div class="side-head">
       <nav class="crumbs" aria-label=${t('Location')}>
@@ -1155,18 +1619,24 @@ function Side({ s, draft, setDraft, files, setFiles }) {
               <${Icon} name="chevron" /><span class="crumb-kind">${t('Project')}</span><span class="crumb-root ellipsis">${s.projectId}</span>
             </button>
             <span class="crumb-sep" aria-hidden="true">/</span>
-            <button type="button" class="crumb crumb-rename" title=${t('Rename {name}', { name: scan ? scan.name : bare(project.file) })} disabled=${!!project.turn}
-              onClick=${() => setState({ dialog: { kind: 'rename-file', file: scan ? scan.name : project.file, scan: !!scan } })}>
-              <span class="crumb-name ellipsis">${scan ? scan.name : bare(project.file)}</span><${Icon} name="pencil" />
-            </button>`
+            ${naming === named
+              ? html`<${NameEdit} key=${named} value=${(scan ? scan.name : project.file).replace(/\.(py|stl)$/i, '')} onClose=${() => setNaming(null)}
+                  onSave=${(name) => renameFile(scan ? scan.name : project.file, name, !!scan)} />`
+              : html`<button type="button" class="crumb crumb-rename" title=${t('Rename {name}', { name: scan ? scan.name : bare(project.file) })} disabled=${!!project.turn}
+                  onClick=${() => setNaming(named)}>
+                  <span class="crumb-name ellipsis">${scan ? scan.name : bare(project.file)}</span><${Icon} name="pencil" />
+                </button>`}`
           : html`<button type="button" class="crumb" title=${t('All projects')} onClick=${showHome}>
               <${Icon} name="chevron" /><span class="crumb-root">${t('Projects')}</span>
             </button>
             ${s.projectId && html`<span class="crumb-sep" aria-hidden="true">/</span>
-              <button type="button" class="crumb crumb-rename" title=${t('Rename the project {name}', { name: s.projectId })} disabled=${!project || !!project.turn}
-                onClick=${() => setState({ dialog: { kind: 'rename', projectId: s.projectId } })}>
-                <span class="crumb-name ellipsis">${s.projectId}</span><${Icon} name="pencil" />
-              </button>`}`}
+              ${naming === named
+                ? html`<${NameEdit} key=${named} value=${s.projectId} hint=${t('Its folder will be renamed too.')} onClose=${() => setNaming(null)}
+                    onSave=${(name) => renameProject(s.projectId, name)} />`
+                : html`<button type="button" class="crumb crumb-rename" title=${t('Rename the project {name}', { name: s.projectId })} disabled=${!project || !!project.turn}
+                    onClick=${() => setNaming(named)}>
+                    <span class="crumb-name ellipsis">${s.projectId}</span><${Icon} name="pencil" />
+                  </button>`}`}`}
       </nav>
     </div>
     ${listing && html`<${ModelList} project=${project} unpicked=${s.unpicked} dragging=${s.dragging} uploading=${s.uploading} />`}
@@ -1182,7 +1652,7 @@ function Side({ s, draft, setDraft, files, setFiles }) {
       </div>
     </div>`}
     ${project && !listing && !scan && (tab === 'chat'
-      ? html`<${Timeline} project=${project} now=${s.now} models=${info.models} onSuggest=${reuse} />`
+      ? html`<${Timeline} project=${project} now=${s.now} models=${info.models} onSuggest=${reuse} onCamera=${camera} onPicture=${picture} onScan=${scanFile} />`
       : tab === 'params'
         ? html`<${Params} meta=${meta?.ok ? meta : null} locked=${!!project.turn || !!s.peek} />`
         : tab === 'summary'
@@ -1193,7 +1663,7 @@ function Side({ s, draft, setDraft, files, setFiles }) {
         : html`<h3>${t('No project open')}</h3><p>${t('Create a project to get started. It can be empty.')}</p>`}
     </div></div>`}
     ${project && !listing && !scan && html`<${Composer} project=${project} info=${info} model=${s.model} draft=${draft} setDraft=${setDraft}
-      files=${files} setFiles=${setFiles} dragging=${s.dragging} limits=${s.limits} now=${s.now} />`}
+      files=${files} setFiles=${setFiles} onCamera=${camera} dragging=${s.dragging} limits=${s.limits} now=${s.now} />`}
   </aside>`;
 }
 
@@ -1407,35 +1877,17 @@ function CodeView({ project, peek }) {
 // the STL files models can be made from.
 function ModelList({ project, unpicked, dragging, uploading }) {
   const picked = unpicked ? null : project.file;
-  const [renaming, setRenaming] = useState(null); // { from, to, scan }
+  const [renaming, setRenaming] = useState(null); // the row whose name is being edited: { name, scan }
   const locked = !!project.turn;
   const open = (show, name) => (event) => {
     tabFrom = event.currentTarget.getBoundingClientRect().top;
     attempt(() => show(name));
   };
-
-  const rename = async (event) => {
-    event.preventDefault();
-    const { from, to, scan } = renaming;
-    if (!to.trim() || to.trim() === from.replace(/\.(py|stl)$/i, '')) {
-      setRenaming(null);
-      return;
-    }
-    const ok = await attempt(async () => {
-      if (scan) {
-        await fetch(`${scanPath(project.id, from)}/rename`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ to: to.trim() }) }).then(reply);
-        return;
-      }
-      const { file } = await api(`/projects/${project.id}/files/${encodeURIComponent(from)}/rename`, { to: to.trim() });
-      if (from === project.file) await openFile(file);
-    });
-    if (ok) setRenaming(null);
-  };
-  const form = (key) => html`<form class="model-tab is-form" key=${key} onSubmit=${rename}>
-    <input class="input" autofocus value=${renaming.to} aria-label=${t('New name')} onInput=${(e) => setRenaming({ ...renaming, to: e.target.value })}
-      onKeyDown=${(e) => { if (e.key === 'Escape') { e.stopPropagation(); setRenaming(null); } }} />
-    <button type="submit" class="btn btn-sm btn-primary">${t('Change')}</button>
-  </form>`;
+  // The row of a file while its name is edited: the same row, with a field where the name was.
+  const editing = (name, scan, src) => html`<div class=${`model-tab is-form ${scan ? 'is-scan' : ''}`} key=${scan ? `scan:${name}` : name}>
+    <${Thumb} src=${src} scan=${scan} />
+    <${NameEdit} value=${name.replace(/\.(py|stl)$/i, '')} onSave=${(to) => renameFile(name, to, scan)} onClose=${() => setRenaming(null)} />
+  </div>`;
   const removeModel = (name) => setState({
     dialog: {
       kind: 'confirm',
@@ -1462,14 +1914,14 @@ function ModelList({ project, unpicked, dragging, uploading }) {
       <button type="button" class="list-add" disabled=${locked} title=${t('New model')} onClick=${() => attempt(newModel)}><${Icon} name="plus" /><span>${t('New')}</span></button>
     </div>
     ${project.files.length === 0 && html`<p class="list-empty">${t('No model yet. Start an empty one, or make one from an STL below.')}</p>`}
-    ${project.files.map((file) => (renaming?.from === file.name && !renaming.scan ? form(file.name)
+    ${project.files.map((file) => (renaming?.name === file.name && !renaming.scan ? editing(file.name, false, modelThumb(project, file))
       : html`<div class="model-row" key=${file.name}>
           <button type="button" class=${`model-tab ${file.name === picked ? 'is-current' : ''}`} aria-expanded="false" onClick=${open(showModel, file.name)}>
             <${Thumb} src=${modelThumb(project, file)} /><span class="grow ellipsis">${bare(file.name)}</span>
             ${project.turn?.file === file.name && html`<span class="spinner" />`}
           </button>
           <span class="row-actions">
-            <${IconButton} icon="pencil" label=${t('Rename {name}', { name: bare(file.name) })} disabled=${locked} onClick=${() => setRenaming({ from: file.name, to: file.name.replace(/\.py$/, '') })} />
+            <${IconButton} icon="pencil" label=${t('Rename {name}', { name: bare(file.name) })} disabled=${locked} onClick=${() => setRenaming({ name: file.name, scan: false })} />
             <${IconButton} icon="copy" label=${t('Duplicate {name}', { name: bare(file.name) })} disabled=${locked} onClick=${() => attempt(() => api(`/projects/${project.id}/files`, { name: `${bare(file.name)}_copy`, copyOf: file.name }), t('Duplicated'))} />
             <${IconButton} icon="trash" label=${t('Delete {name}', { name: bare(file.name) })} disabled=${locked} onClick=${() => removeModel(file.name)} />
           </span>
@@ -1481,14 +1933,14 @@ function ModelList({ project, unpicked, dragging, uploading }) {
       </button>
     </div>
     ${project.scans.length === 0 && html`<p class="list-empty">${t('An STL is a finished shape without parameters. Load one to make a parametric model from it, or to take its dimensions when designing a part that has to fit it.')}</p>`}
-    ${project.scans.map((scan) => (renaming?.from === scan.name && renaming.scan ? form(`scan:${scan.name}`)
+    ${project.scans.map((scan) => (renaming?.name === scan.name && renaming.scan ? editing(scan.name, true, scanThumb(project, scan))
       : html`<div class="model-row" key=${`scan:${scan.name}`}>
         <button type="button" class="model-tab is-scan" aria-expanded="false" onClick=${open(showScan, scan.name)}>
           <${Thumb} src=${scanThumb(project, scan)} scan=${true} /><span class="grow ellipsis">${scan.name}</span>
         </button>
         <span class="row-actions">
           <${IconButton} icon="sparkles" label=${t('Create a parametric model from {name}', { name: scan.name })} disabled=${!canCreate} onClick=${() => attempt(() => modelFromScan(scan.name))} />
-          <${IconButton} icon="pencil" label=${t('Rename {name}', { name: scan.name })} disabled=${locked} onClick=${() => setRenaming({ from: scan.name, to: scan.name.replace(/\.stl$/i, ''), scan: true })} />
+          <${IconButton} icon="pencil" label=${t('Rename {name}', { name: scan.name })} disabled=${locked} onClick=${() => setRenaming({ name: scan.name, scan: true })} />
           <${IconButton} icon="trash" label=${t('Delete {name}', { name: scan.name })} disabled=${locked} onClick=${() => removeScan(scan.name)} />
         </span>
       </div>`))}
@@ -1700,10 +2152,20 @@ function ProjectRow({ project, now }) {
       },
     },
   });
-  const act = (kind) => () => setState({ dialog: { kind, projectId: project.id } });
+  const [naming, setNaming] = useState(false);
   const contents = [
     project.models + project.scans ? plural(project.models + project.scans, 'model', 'models') : t('no model'),
   ].filter(Boolean).join(', ');
+  // While its name is edited the row is not a button: the field stands where the name was.
+  if (naming) {
+    return html`<li class="project-row is-form">
+      <div class="project-row-open">
+        <${Icon} name="project" />
+        <${NameEdit} value=${project.id} hint=${t('Its folder will be renamed too.')} onSave=${(name) => renameProject(project.id, name)} onClose=${() => setNaming(false)} />
+        <span class="project-row-meta">${contents}</span>
+      </div>
+    </li>`;
+  }
   return html`<li class="project-row">
     <button type="button" class="project-row-open" onClick=${() => openProject(project.id)}>
       <${Icon} name="project" />
@@ -1714,8 +2176,8 @@ function ProjectRow({ project, now }) {
       <span class="project-row-meta">${contents}</span>
     </button>
     <span class="project-row-actions">
-      <${IconButton} icon="pencil" label=${t('Rename the project {name}', { name: project.id })} onClick=${act('rename')} />
-      <${IconButton} icon="copy" label=${t('Duplicate the project {name}', { name: project.id })} onClick=${act('duplicate')} />
+      <${IconButton} icon="pencil" label=${t('Rename the project {name}', { name: project.id })} onClick=${() => setNaming(true)} />
+      <${IconButton} icon="copy" label=${t('Duplicate the project {name}', { name: project.id })} onClick=${() => setState({ dialog: { kind: 'duplicate', projectId: project.id } })} />
       <${IconButton} icon="trash" label=${t('Delete the project {name}', { name: project.id })} onClick=${remove} />
     </span>
   </li>`;
@@ -1788,8 +2250,9 @@ function App() {
     return () => window.removeEventListener('keydown', onKey);
   }, []);
 
-  // Files dropped anywhere on the page: a mesh becomes a scan of the project,
-  // anything else is context for the next prompt. With no project open, they
+  // Files dropped anywhere on the page: a mesh becomes a scan of the project
+  // (and is named in the prompt, beside a conversation), anything else is
+  // context for the next prompt. With no project open, they
   // start a new one.
   useEffect(() => {
     let depth = 0;
@@ -1820,7 +2283,8 @@ function App() {
       }
       if (meshes.length) {
         if (state.project.turn) toast(t('Wait until I finish'), { error: true });
-        else addScans(meshes);
+        // Beside a conversation the STL is also named in its prompt.
+        else addScans(meshes).then((names) => { if (!listing && !state.scanOpen) nameScans(names, setDraft); });
       }
       if (rest.length) addFiles(rest, filesRef.current, setFiles);
     };
@@ -1836,6 +2300,22 @@ function App() {
     };
   }, []);
 
+  // A photo from the camera joins the files of the next prompt. One of a sketch
+  // brings its request along, ready to send or to add the dimensions to.
+  const addPhoto = (photo, sketch) => {
+    const taken = filesRef.current;
+    const base = sketch ? t('sketch') : t('photo');
+    let name = `${base}.jpg`;
+    for (let n = 2; taken.some((file) => file.name === name); n += 1) name = `${base}-${n}.jpg`;
+    setFiles([...taken, { name, ...photo }]);
+    if (sketch) setDraft((was) => (was.trim() ? was : t('Make a model from the sketch in the photo')));
+    requestAnimationFrame(() => {
+      const box = document.querySelector('.composer textarea');
+      box?.focus();
+      box?.setSelectionRange(box.value.length, box.value.length);
+    });
+  };
+
   if (s.boot === 'loading') return html`<div class="screen"><div class="working"><span class="spinner" />${t('Starting up…')}</div></div>`;
   if (s.boot !== 'ready') {
     return html`<div class="screen"><div class="card">
@@ -1848,10 +2328,9 @@ function App() {
     <${Side} s=${s} draft=${draft} setDraft=${setDraft} files=${files} setFiles=${setFiles} />
     <${Stage} s=${s} />
     ${s.home && html`<${Home} s=${s} />`}
-    ${s.dialog?.kind === 'rename' && html`<${RenameProjectDialog} projectId=${s.dialog.projectId} />`}
-    ${s.dialog?.kind === 'rename-file' && html`<${RenameFileDialog} file=${s.dialog.file} scan=${s.dialog.scan} />`}
     ${s.dialog?.kind === 'duplicate' && html`<${DuplicateDialog} projectId=${s.dialog.projectId} />`}
     ${s.dialog?.kind === 'confirm' && html`<${ConfirmDialog} ...${s.dialog} />`}
+    ${s.dialog?.kind === 'camera' && html`<${CameraDialog} onUse=${(photo) => addPhoto(photo, s.dialog.sketch)} />`}
     <div class="toasts" role="status" aria-live="polite">
       ${s.toasts.map((item) => html`<div class=${`toast ${item.error ? 'is-error' : ''}`} key=${item.id}>${item.text}</div>`)}
     </div>
