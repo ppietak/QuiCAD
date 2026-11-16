@@ -1,0 +1,54 @@
+#!/usr/bin/env python3
+# Starts the app with nothing but a system python3: makes sure the app's own
+# Python environment exists, then runs the app (app/cli.py) with it.
+# This file must run on Python 3.8; the app itself may need a newer one.
+
+import os
+import subprocess
+import sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+MARK = 'APP_LAUNCHED'  # set for the interpreter this file re-runs itself with
+OLDEST = (3, 10)              # the oldest Python the app's own code runs on
+
+
+def app_python(args):
+    """The interpreter to run the app with, for the command in `args`."""
+    from app import config
+
+    if args and args[0] in ('-h', '--help', 'help'):
+        return sys.executable if sys.version_info >= OLDEST else config.ensure_python()
+    # The editor needs the CAD engine: this installs it on the first run.
+    python = config.ensure_python()
+    os.environ['APP_PYTHON'] = python  # checked once; the app need not check again
+    return python
+
+
+def same(a, b):
+    return os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
+
+
+def main():
+    args = sys.argv[1:]
+    if not os.environ.get(MARK):
+        try:
+            python = app_python(args)
+        except Exception as err:  # noqa: BLE001
+            print(err, file=sys.stderr)
+            sys.exit(1)
+        if not same(python, sys.executable):
+            os.environ[MARK] = '1'
+            command = [python, os.path.abspath(__file__)] + args
+            if os.name == 'nt':
+                try:
+                    sys.exit(subprocess.call(command))
+                except KeyboardInterrupt:
+                    sys.exit(0)
+            os.execv(python, command)
+    from app.cli import main as run
+    run(args)
+
+
+if __name__ == '__main__':
+    main()

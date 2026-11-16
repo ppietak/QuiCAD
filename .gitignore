@@ -1,0 +1,12 @@
+# everything the app writes at run time: your projects, the Python environment, the access key
+projects/
+.data/
+
+# Python
+__pycache__/
+*.pyc
+
+# editors, OS
+.idea/
+.vscode/
+.DS_Store
