@@ -10,7 +10,7 @@ import sys
 import threading
 import urllib.request
 
-from .config import DEFAULT_PORT, PROJECTS_DIR, access_token, ensure_python
+from .config import DEFAULT_PORT, access_token, ensure_python, projects_dir
 
 USAGE = f"""Usage, in the app's folder:
   ./start [options]    start the editor and open it in the browser
@@ -19,9 +19,11 @@ Options:
   --port <number>  port (default {DEFAULT_PORT})
   --no-open        do not open the browser
   --api-keys       let Claude Code and Codex use an API key from the environment
-                   (billed per use); without it turns always run on the subscription
+                   (billed per use); without it turns run on the subscription,
+                   unless the settings say otherwise
 
-Projects live in {PROJECTS_DIR} (the APP_PROJECTS variable points to another folder).
+Projects live in {projects_dir()} (another folder is chosen in the settings,
+or named by the APP_PROJECTS variable).
 The editor works through Claude Code or Codex, as they are signed in on this computer."""
 
 
@@ -122,7 +124,7 @@ def command_open(argv):
             print(f"{provider['name']}: not signed in with a subscription (sign in with `{provider['command']}` itself).")
         else:
             print(f"{provider['name']}: not installed ({provider['install']}).")
-    print(f'Projects: {PROJECTS_DIR}')
+    print(f'Projects: {projects_dir()}')
     print(f'Editor: {url}')
     print('Ctrl+C quits.', flush=True)
     if open_:

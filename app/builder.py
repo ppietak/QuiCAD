@@ -11,7 +11,7 @@ import subprocess
 import tempfile
 import threading
 
-from .config import APP_DIR, BUILD_TIMEOUT_S, PROJECTS_DIR, ENGINE_VERSION, MESH, MODELS_DIR, SCANS_DIR, STATE_DIR
+from .config import APP_DIR, BUILD_TIMEOUT_S, ENGINE_VERSION, MESH, MODELS_DIR, SCANS_DIR, STATE_DIR
 
 WORKER = os.path.join(APP_DIR, 'py', 'worker.py')
 CACHE_KEEP = 80  # builds kept per project
@@ -26,10 +26,10 @@ WORKER_ENV = {'PATH', 'HOME', 'USER', 'LOGNAME', 'LANG', 'TMPDIR', 'TEMP', 'TMP'
               'WINDIR', 'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH', 'APPDATA', 'LOCALAPPDATA', 'PATHEXT', 'COMSPEC',
               'NUMBER_OF_PROCESSORS', 'PROCESSOR_ARCHITECTURE', 'APP_NO_FORK'}
 SANDBOX_EXEC = '/usr/bin/sandbox-exec'
-_sandbox_prefix = None
+_sandbox_prefixes = {}  # (python, projects folder) -> what goes before the worker's command
 
 
-def _sandbox_profile(python):
+def _sandbox_profile(python, projects):
     """
     The rules macOS holds the worker (and so every model) to: no network; writing
     only inside the projects folder and the temporary folders; of the user's home,
@@ -50,26 +50,26 @@ def _sandbox_profile(python):
         '(allow default)',
         '(deny network*)',
         '(deny file-write*)',
-        f'(allow file-write* {subpaths([PROJECTS_DIR, *temporary])} (regex #"^/dev/"))',
+        f'(allow file-write* {subpaths([projects, *temporary])} (regex #"^/dev/"))',
         f'(deny file-read-data (subpath {quoted(home)}))',
-        f'(allow file-read-data {subpaths([PROJECTS_DIR, APP_DIR, *prefixes, os.path.join(home, "Library", "Fonts"), *temporary])})',
+        f'(allow file-read-data {subpaths([projects, APP_DIR, *prefixes, os.path.join(home, "Library", "Fonts"), *temporary])})',
     ])
 
 
-def _sandbox(python):
+def _sandbox(python, projects):
     """What to put before the worker's command so the system fences it in; nothing where it cannot."""
-    global _sandbox_prefix
-    if _sandbox_prefix is None:
-        _sandbox_prefix = []
+    key = (python, projects)
+    if key not in _sandbox_prefixes:
+        _sandbox_prefixes[key] = []
         if os.path.exists(SANDBOX_EXEC) and not os.environ.get('APP_NO_SANDBOX'):
             try:
-                prefix = [SANDBOX_EXEC, '-p', _sandbox_profile(python)]
+                prefix = [SANDBOX_EXEC, '-p', _sandbox_profile(python, projects)]
                 # Tried once on something harmless: a system that refuses the rules runs without them.
                 if subprocess.run([*prefix, '/usr/bin/true'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
-                    _sandbox_prefix = prefix
+                    _sandbox_prefixes[key] = prefix
             except OSError:
                 pass
-    return _sandbox_prefix
+    return _sandbox_prefixes[key]
 
 
 class _Waiter:
@@ -126,8 +126,11 @@ def _remove(target):
 
 
 class Builder:
-    def __init__(self, python):
+    """The worker that builds models, for the projects of one folder: the system lets it write nowhere else."""
+
+    def __init__(self, python, projects):
         self.python = python
+        self.projects = projects
         self.child = None
         self.starting = None  # the wait for the worker being warm
         self.pending = {}     # request id -> waiter
@@ -154,7 +157,7 @@ class Builder:
         env['PYTHONDONTWRITEBYTECODE'] = '1'
         env['OBJC_DISABLE_INITIALIZE_FORK_SAFETY'] = 'YES'
         try:
-            child = subprocess.Popen([*_sandbox(self.python), self.python, WORKER], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            child = subprocess.Popen([*_sandbox(self.python, self.projects), self.python, WORKER], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                      stderr=subprocess.PIPE, env=env)
         except OSError as err:
             self.starting = None
@@ -218,13 +221,20 @@ class Builder:
     def stop(self):
         with self.lock:
             child = self.child
+            starting = self.starting
             self.child = None
             self.starting = None
+            waiters = list(self.pending.values())
+            self.pending.clear()
         if child:
             try:
                 child.terminate()
             except OSError:
                 pass
+        # Whoever still waits for the worker is told at once, not when their time runs out.
+        error = RuntimeError('The CAD engine stopped working (stopped).')
+        for waiter in [*waiters, *([starting] if starting else [])]:
+            waiter.reject(error)
 
     def request(self, payload):
         self.start()

@@ -69,6 +69,22 @@ function applyTheme(chosen) {
 }
 if (storedTheme()) document.documentElement.dataset.theme = storedTheme();
 
+// The person asked the system for less motion: nothing slides or fades then.
+const STILL = matchMedia('(prefers-reduced-motion: reduce)');
+
+/** The other look comes as a fade of the whole page at once, where the browser can do that. */
+function changeTheme(chosen) {
+  if (STILL.matches || !document.startViewTransition) {
+    applyTheme(chosen);
+    return;
+  }
+  document.startViewTransition(async () => {
+    applyTheme(chosen);
+    await null; // the page is drawn in the new look before the picture of it is taken
+    await null;
+  });
+}
+
 // --- store -------------------------------------------------------------------
 
 let state = {
@@ -77,6 +93,7 @@ let state = {
   limits: null,        // subscription usage as last reported: { fiveHour, week }
   projectId: null,
   home: false,         // the dashboard of all projects, over everything else
+  back: false,         // the dashboard was come back to from a project (it is not the one of the start)
   project: null,       // the server's snapshot of the open project, with one model open
   opening: null,       // name of the model being switched to
   building: false,
@@ -88,7 +105,7 @@ let state = {
   model: null,         // the Claude model for the next prompt; every session starts on the default
   options: { dims: true, refs: false, scans: false, grid: true, code: false },
   scanOpen: null,      // the STL picked in the list: shown alone, in place of the model
-  dialog: null,        // null | { kind: 'duplicate', projectId } | { kind: 'confirm', ... } | { kind: 'camera', sketch }
+  dialog: null,        // null | { kind: 'duplicate', projectId } | { kind: 'confirm', ... } | { kind: 'camera', sketch } | { kind: 'settings' }
   spot: null,          // a point on the model picked with the right mouse button, while its prompt is open
   toasts: [],
   dragging: false,
@@ -166,6 +183,37 @@ function setAddress(id, file) {
 let events = null;
 let fileLoad = 0;
 
+// --- going between the levels --------------------------------------------------
+// All projects > one project (the list of its models) > one model. A move between them is drawn the
+// same way everywhere: going deeper, what is new comes in from the right; going back, it comes in from
+// the left, and the name that is left behind slides off to the right and fades.
+
+const GLIDE = { duration: 280, easing: 'cubic-bezier(.2, .8, .2, 1)' };
+let travel = null; // the person is going to another level: { at, nameAt }. The side panel draws the move and takes this.
+
+/** Note a move the person makes, before the page changes: where the project's name stands now, for its slide to the new place. */
+function moving() {
+  travel = { at: performance.now(), fromHome: state.home, nameAt: document.querySelector('.side-head [data-name="project"]')?.getBoundingClientRect().left ?? null };
+}
+
+/** Going back: the last name of the path slides off to the right and fades. */
+function nameLeaves() {
+  const name = document.querySelector('.side-head .crumb-rename');
+  if (!name || STILL.matches) return;
+  // A copy of it over the page, kept within the head of the panel, so that the page can change underneath.
+  const head = name.closest('.side-head').getBoundingClientRect();
+  const box = name.getBoundingClientRect();
+  const frame = Object.assign(document.createElement('div'), { className: 'crumb-ghost', inert: true });
+  Object.assign(frame.style, { left: `${head.left}px`, top: `${head.top}px`, width: `${head.width}px`, height: `${head.height}px` });
+  const copy = name.cloneNode(true);
+  Object.assign(copy.style, { position: 'absolute', left: `${box.left - head.left}px`, top: `${box.top - head.top}px`, width: `${box.width}px` });
+  frame.append(copy);
+  document.body.append(frame);
+  // It is gone quickly, well before the slide would end: the way it goes is seen, the name does not linger.
+  copy.animate({ transform: ['none', 'translateX(36px)'] }, { ...GLIDE, fill: 'forwards' });
+  copy.animate({ opacity: [1, 0] }, { duration: 120, easing: 'ease-out', fill: 'forwards' }).finished.finally(() => frame.remove());
+}
+
 /** Open one of the project's models; without a name, the one the server holds current. */
 async function openFile(name = null) {
   const id = state.projectId;
@@ -239,6 +287,7 @@ function connectEvents(id) {
 }
 
 async function openProject(id, file = null) {
+  if (state.home) moving(); // picked in the list of projects
   events?.close();
   fileLoad += 1;
   setState({ home: false, projectId: id, project: null, opening: null, peek: null, building: false, tab: 'chat', listing: false, unpicked: !file, scanOpen: null, spot: null });
@@ -282,21 +331,26 @@ async function addScans(files) {
 
 /** Show one of the project's models with its conversation. */
 async function showModel(name) {
-  setState({ unpicked: false });
+  moving();
   const other = name !== state.project?.file;
+  // The list stays up while another model loads; the panel changes once, when the model is there.
   if (other) await openFile(name);
-  setState({ listing: false, scanOpen: null, ...(other ? { tab: 'chat' } : {}) }); // another model opens on its conversation
+  if (state.project?.file !== name) return; // it could not be opened
+  setState({ unpicked: false, listing: false, scanOpen: null, ...(other ? { tab: 'chat' } : {}) }); // another model opens on its conversation
   setAddress(state.projectId, name);
 }
 
 /** Back to the list of the project's models; the address then names only the project. */
 function showList() {
+  moving();
+  nameLeaves();
   setState({ listing: true, scanOpen: null, peek: null, spot: null });
   history.replaceState(null, '', `#p=${state.projectId}`);
 }
 
 /** Show one of the project's STL files, alone. */
 function showScan(name) {
+  moving();
   setState({ scanOpen: name, listing: false, peek: null, spot: null });
 }
 
@@ -529,6 +583,7 @@ const ICONS = {
   trash: '<path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M10 11v6"/><path d="M14 11v6"/>',
   pin: '<path d="M20 10c0 4.99-5.54 10.19-7.4 11.8a1 1 0 0 1-1.2 0C9.54 20.19 4 14.99 4 10a8 8 0 0 1 16 0"/><circle cx="12" cy="10" r="3"/>',
   moon: '<path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/>',
+  settings: '<path d="M14 17H5"/><path d="M19 7h-9"/><circle cx="17" cy="17" r="3"/><circle cx="7" cy="7" r="3"/>',
   sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/>',
   history: '<path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/>',
 };
@@ -555,15 +610,7 @@ function Thumb({ src, scan = false }) {
 function ThemeToggle({ theme, small = false }) {
   const dark = theme === 'dark';
   return html`<${IconButton} icon=${dark ? 'sun' : 'moon'} label=${dark ? t('Light theme') : t('Dark theme')} small=${small}
-    onClick=${() => applyTheme(dark ? 'light' : 'dark')} />`;
-}
-
-// The language of the page, chosen on the dashboard and remembered.
-function LanguagePicker({ lang }) {
-  const choose = async (event) => setState({ lang: await setLanguage(event.target.value, { remember: true }) });
-  return html`<select class="select" aria-label=${t('Language')} title=${t('Language')} value=${lang} onChange=${choose}>
-    ${LANGUAGES.map((item) => html`<option value=${item.code} key=${item.code}>${item.label}</option>`)}
-  </select>`;
+    onClick=${() => changeTheme(dark ? 'light' : 'dark')} />`;
 }
 
 // Closes a menu or popover on a click elsewhere or on Escape.
@@ -584,18 +631,90 @@ function useDismiss(open, close) {
   return ref;
 }
 
+// The tabs of the side panel. The plate behind the open one is a single piece that slides to it
+// (style.css, "motion"); a tab is as wide as its word, so the plate is put where that tab really is.
+const TABS = [['chat', 'Conversation'], ['params', 'Parameters'], ['summary', 'Summary'], ['history', 'History']];
+
+function Tabs({ tab: shown }) {
+  const list = useRef(null);
+  const place = () => {
+    const open = list.current?.querySelector('[aria-selected="true"]');
+    if (!open) return;
+    const [whole, tab] = [list.current.getBoundingClientRect(), open.getBoundingClientRect()];
+    list.current.style.setProperty('--x', `${tab.left - whole.left}px`);
+    list.current.style.setProperty('--w', `${tab.width}px`);
+  };
+  useLayoutEffect(place);  // after every draw: another tab is open, or the words are in another language
+  useEffect(() => {
+    // The words also change width by themselves, when their font arrives.
+    const watch = new ResizeObserver(place);
+    for (const button of list.current.children) watch.observe(button);
+    const placed = requestAnimationFrame(() => list.current?.classList.add('is-placed'));
+    return () => { watch.disconnect(); cancelAnimationFrame(placed); };
+  }, []);
+  return html`<div class="tabs has-plate" role="tablist" ref=${list}>
+    ${TABS.map(([id, name]) => html`<button type="button" role="tab" key=${id} aria-selected=${String(shown === id)} onClick=${() => setState({ tab: id })}>${t(name)}</button>`)}
+  </div>`;
+}
+
+// Rows of a list that come, go or move while the list is on screen: a new one grows in where it lands,
+// one that is gone fades out where it was, and the others slide to their places. The rows are told
+// apart by their `data-row`; the list is the positioned box they are in.
+function useRowMotion(list) {
+  const before = useRef(null); // row name -> { node, top, left, width, height }, as last drawn
+  useLayoutEffect(() => {
+    const host = list.current;
+    if (!host) return;
+    const frame = host.getBoundingClientRect();
+    const rows = new Map([...host.querySelectorAll('[data-row]')].map((node) => {
+      const box = node.getBoundingClientRect();
+      return [node.dataset.row, { node, top: box.top - frame.top + host.scrollTop, left: box.left - frame.left, width: box.width, height: box.height }];
+    }));
+    const was = before.current;
+    before.current = rows;
+    // Not on the first draw, and not when the list holds other things altogether (another project).
+    if (!was || STILL.matches || (was.size > 0 && ![...was.keys()].some((name) => rows.has(name)))) return;
+    for (const [name, row] of rows) {
+      const old = was.get(name);
+      if (!old) row.node.animate([{ opacity: 0, transform: 'scale(.96)' }, { opacity: 1, transform: 'none' }], { ...GLIDE, duration: 320 });
+      else if (Math.abs(old.top - row.top) > 0.5) row.node.animate([{ transform: `translateY(${old.top - row.top}px)` }, { transform: 'none' }], GLIDE);
+    }
+    for (const [name, old] of was) {
+      if (rows.has(name)) continue;
+      const ghost = old.node.cloneNode(true);
+      ghost.removeAttribute('data-row'); // a picture of the row, not a row: the next look at the list passes it by
+      ghost.inert = true;
+      Object.assign(ghost.style, { position: 'absolute', left: `${old.left}px`, top: `${old.top}px`, width: `${old.width}px`, height: `${old.height}px`, margin: 0, pointerEvents: 'none' });
+      host.append(ghost);
+      ghost.animate([{ opacity: 1, transform: 'none' }, { opacity: 0, transform: 'scale(.96)' }], { duration: 180, easing: 'ease-in', fill: 'forwards' }).finished.finally(() => ghost.remove());
+    }
+  });
+}
+
 // --- dialogs -----------------------------------------------------------------
 
 const closeDialog = () => setState({ dialog: null });
 
-function Dialog({ title, lead, children, onClose = closeDialog }) {
+// What is dismissed stays drawn for a moment, so that it can be seen leaving:
+// gives [what to draw, whether it is leaving]. No wait where motion is not wanted.
+function useLeaving(value, ms) {
+  const [kept, setKept] = useState(value);
+  useEffect(() => {
+    if (value) { setKept(value); return undefined; }
+    const timer = setTimeout(() => setKept(value), matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : ms);
+    return () => clearTimeout(timer);
+  }, [value]);
+  return value ? [value, false] : [kept, !!kept];
+}
+
+function Dialog({ title, lead, children, wide = false, onClose = closeDialog }) {
   useEffect(() => {
     const onKey = (event) => { if (event.key === 'Escape') onClose(); };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
   }, []);
   return html`<div class="overlay" onMouseDown=${(event) => { if (event.target === event.currentTarget) onClose(); }}>
-    <div class="dialog" role="dialog" aria-modal="true" aria-label=${title}>
+    <div class=${`dialog ${wide ? 'is-wide' : ''}`} role="dialog" aria-modal="true" aria-label=${title}>
       <h2>${title}</h2>
       ${lead && html`<p>${lead}</p>`}
       ${children}
@@ -713,6 +832,115 @@ function ConfirmDialog({ title, lead, label, action }) {
       <button type="button" class="btn" onClick=${closeDialog}>${t('Cancel')}</button>
       <button type="button" class="btn btn-danger" disabled=${form.busy} onClick=${form.submit}>${label}</button>
     </div>
+  <//>`;
+}
+
+// --- settings ----------------------------------------------------------------
+
+// The system's own window for choosing a folder. The desktop app has one on its
+// window (desktop/window.py); for a page in a browser the server opens it.
+async function chooseFolder(start) {
+  const own = window.pywebview?.api?.folder;
+  if (own) return own(start);
+  return (await api('/settings/folder', { prompt: t('Folder for projects'), start })).path;
+}
+
+// What the app keeps for the person: the language of the page, where projects
+// are, what prompts are billed to, and where Claude Code and Codex are when the
+// app does not find them by itself. Nothing changes before Save.
+function SettingsDialog({ lang }) {
+  const [known, setKnown] = useState(null); // what is set now, and what the app found on this computer
+  const [form, setForm] = useState({ lang, projects: '', assistant: 'claude', billing: 'subscription' });
+  const set = (patch) => setForm((was) => ({ ...was, ...patch }));
+  // API keys go one way, to the app: what is typed here ({ id: text }), and which kept one is to be forgotten ({ id: true }).
+  const [keys, setKeys] = useState({});
+  const [forget, setForget] = useState({});
+  const save = useSubmit(async () => {
+    const { lang: chosen, billing, ...rest } = form;
+    const typed = Object.fromEntries(known.clis.flatMap((cli) => (forget[cli.id] ? [[cli.id, '']] : keys[cli.id]?.trim() ? [[cli.id, keys[cli.id].trim()]] : [])));
+    await api('/settings', { ...rest, ...(known.billingForced ? {} : { billing }), ...(Object.keys(typed).length ? { keys: typed } : {}) });
+    if (chosen !== lang) setState({ lang: await setLanguage(chosen, { remember: true }) });
+    await refreshAccounts();
+    toast(t('Settings saved'));
+  });
+  useEffect(() => {
+    api('/settings')
+      .then((found) => {
+        setKnown(found);
+        // One CLI is always chosen: Claude Code while the app names none.
+        set({ projects: found.projects, assistant: found.assistant || 'claude', billing: found.billing, ...Object.fromEntries(found.clis.map((cli) => [cli.id, cli.path])) });
+      })
+      .catch((err) => save.setProblem(err.message));
+  }, []);
+  const choose = () => attempt(async () => {
+    const folder = await chooseFolder(form.projects || known.projectsDefault);
+    if (folder) set({ projects: folder });
+  });
+  const billing = [
+    ['subscription', t('Subscription'), t('Only the plan Claude Code or Codex is signed in with. An API key is never used.')],
+    ['api-key', t('API key'), t('An API key: the one given below, or one that Claude Code or Codex is signed in with or finds in the environment. Billed per use.')],
+  ];
+  // What is asked about a CLI is asked about the one prompts run on.
+  const clis = (known?.clis ?? []).filter((cli) => cli.id === form.assistant);
+  return html`<${Dialog} title=${t('Settings')} wide=${true}>
+    <form class="settings" onSubmit=${save.submit}>
+      <div class="field">
+        <label for="set-lang">${t('Language')}</label>
+        <select id="set-lang" class="input" value=${form.lang} onChange=${(event) => set({ lang: event.target.value })}>
+          ${LANGUAGES.map((item) => html`<option value=${item.code} key=${item.code}>${item.label}</option>`)}
+        </select>
+      </div>
+      <div class="field">
+        <label for="set-projects">${t('Projects folder')}</label>
+        <div class="field-row">
+          <input id="set-projects" class="input mono" value=${form.projects} placeholder=${known?.projectsDefault ?? ''} spellcheck=${false}
+            autocomplete="off" autocapitalize="off" onInput=${(event) => set({ projects: event.target.value })} />
+          ${known?.canChooseFolder && html`<button type="button" class="btn" onClick=${choose}>${t('Choose…')}</button>`}
+        </div>
+        <p class="hint">${t('Projects in another folder stay where they are. They show up again when that folder is chosen.')}</p>
+      </div>
+      <div class="field">
+        <label for="set-assistant">${t('Prompts are run by')}</label>
+        <select id="set-assistant" class="input" value=${form.assistant} onChange=${(event) => set({ assistant: event.target.value })}>
+          ${(known?.clis ?? []).map((cli) => html`<option value=${cli.id} key=${cli.id}>${cli.name}</option>`)}
+        </select>
+      </div>
+      <fieldset class="field" disabled=${!known || known.billingForced}>
+        <legend>${t('Prompts are billed to')}</legend>
+        <div class="choices">
+          ${billing.map(([value, title, text]) => html`<label class="choice" key=${value}>
+            <input type="radio" name="billing" value=${value} checked=${form.billing === value} onChange=${() => set({ billing: value })} />
+            <span><span class="choice-title">${title}</span><span class="choice-text">${text}</span></span>
+          </label>`)}
+        </div>
+        ${known?.billingForced && html`<p class="hint">${t('The app was started with --api-keys, so this cannot be changed here.')}</p>`}
+      </fieldset>
+      ${form.billing === 'api-key' && clis.filter((cli) => cli.key).map((cli) => html`<div class="field" key=${`key-${cli.id}`}>
+        <label for=${`set-key-${cli.id}`}>${t(cli.key)}</label>
+        <div class="field-row">
+          <input id=${`set-key-${cli.id}`} class="input mono" type="password" value=${keys[cli.id] ?? ''} disabled=${!!forget[cli.id]}
+            placeholder=${cli.keyKept && !forget[cli.id] ? `••••••••${cli.keyEnding}` : t('paste the key here')} spellcheck=${false} autocomplete="off" autocapitalize="off"
+            onInput=${(event) => setKeys((was) => ({ ...was, [cli.id]: event.target.value }))} />
+          ${cli.keyKept && html`<button type="button" class="btn" onClick=${() => setForget((was) => ({ ...was, [cli.id]: !was[cli.id] }))}>${forget[cli.id] ? t('Keep the key') : t('Remove the key')}</button>`}
+        </div>
+        <p class="hint">${forget[cli.id] ? t('The key is removed when the settings are saved.')
+          : cli.keyKept ? t('A key is kept on this computer and prompts are billed to it. Type another one to replace it.')
+          : t('It stays on this computer, in a file only you can read, and goes to {name} with each prompt. With no key here, {name} uses the one it is signed in with or finds in the environment.', { name: cli.name })}</p>
+      </div>`)}
+      ${clis.map((cli) => html`<div class="field" key=${cli.id}>
+        <label for=${`set-${cli.id}`}>${cli.name}</label>
+        <input id=${`set-${cli.id}`} class="input mono" value=${form[cli.id] ?? ''} placeholder=${cli.found ?? t('path of the program')} spellcheck=${false}
+          autocomplete="off" autocapitalize="off" onInput=${(event) => set({ [cli.id]: event.target.value })} />
+        ${!form[cli.id] && html`<p class="hint">${cli.found
+          ? t('Found on this computer. Give a path only to use another one.')
+          : t('Not found on this computer. Give the path of the program.')}</p>`}
+      </div>`)}
+      ${save.problem && html`<div class="problem">${save.problem}</div>`}
+      <div class="dialog-actions">
+        <button type="button" class="btn" onClick=${closeDialog}>${t('Cancel')}</button>
+        <button type="submit" class="btn btn-primary" disabled=${!known || save.busy}>${save.busy ? t('Saving…') : t('Save')}</button>
+      </div>
+    </form>
   <//>`;
 }
 
@@ -1160,7 +1388,7 @@ function PromptBlock({ text, attachments, turn, pick }) {
 
 const mono = (text) => html`<span class="mono">${text}</span>`;
 
-function Entry({ entry, now, models, onReuse }) {
+function Entry({ entry, now, models, onReuse, arriving = false }) {
   if (entry.kind !== 'prompt') {
     const texts = {
       create: ['box', t('Model created')],
@@ -1172,7 +1400,7 @@ function Entry({ entry, now, models, onReuse }) {
       rename: ['pencil', tx('Renamed from {name}', { name: mono(bare(entry.from)) })],
     };
     const [icon, what] = texts[entry.kind] ?? ['box', entry.kind];
-    return html`<div class="event" title=${exact(entry.ts)}>
+    return html`<div class=${`event ${arriving ? 'is-new' : ''}`} title=${exact(entry.ts)}>
       <${Icon} name=${icon} /><span class="what">${what}</span><span>${when(entry.ts, now)}</span>
     </div>`;
   }
@@ -1248,9 +1476,16 @@ function Timeline({ project, now, models, onSuggest, onCamera, onPicture, onScan
   };
   const prompts = project.journal.filter((entry) => entry.kind === 'prompt').length;
   const invite = !turn && prompts === 0 ? invitation(project) : null;
+  // What the conversation held when it was opened is simply there; what comes while it is open arrives
+  // (style.css, "motion"). A finished prompt does not: it was on screen already, as the turn.
+  const opened = useRef(null);
+  if (opened.current?.model !== `${project.id}/${project.file}`) {
+    opened.current = { model: `${project.id}/${project.file}`, entries: new Set(project.journal.map((entry) => entry.id)), turn: turn?.id };
+  }
+  const arriving = (entry) => entry.kind !== 'prompt' && !opened.current.entries.has(entry.id);
   return html`<div class="timeline" ref=${ref} onScroll=${onScroll}>
-    ${project.journal.map((entry) => html`<${Entry} key=${entry.id} entry=${entry} now=${now} models=${models} onReuse=${onSuggest} />`)}
-    ${turn && html`<div class="entry">
+    ${project.journal.map((entry) => html`<${Entry} key=${entry.id} entry=${entry} now=${now} models=${models} onReuse=${onSuggest} arriving=${arriving(entry)} />`)}
+    ${turn && html`<div class=${`entry ${turn.id !== opened.current.turn ? 'is-new' : ''}`}>
       <${PromptBlock} text=${turn.text} attachments=${turn.attachments} turn=${turn.id} pick=${turn.pick} />
       ${turn.reply && html`<div class="reply" dangerouslySetInnerHTML=${{ __html: rich(turn.reply) }} />`}
       <div class="working" role="status"><span class="spinner" />${phaseText(turn.phase)}${turn.tokens > 0 && html`<span class="working-tokens">${compact(turn.tokens)}</span>`}</div>
@@ -1291,7 +1526,22 @@ function History({ project, peek, now }) {
       await openFile(file);
     }, t('New model created'));
   };
-  return html`<div class="timeline axis" onScroll=${() => menu && setMenu(null)}>
+  // The mark of the shown version is one piece: it slides along the axis to the version picked (style.css, .axis-mark).
+  const axis = useRef(null);
+  useLayoutEffect(() => {
+    const shown = axis.current?.querySelector('.axis-point.is-shown');
+    const put = (name, value) => axis.current?.style.setProperty(name, `${value}px`);
+    put('--h', shown ? shown.offsetHeight : 0);
+    if (!shown) return;
+    put('--x', shown.offsetLeft);
+    put('--y', shown.offsetTop);
+    put('--w', shown.offsetWidth);
+  });
+  useEffect(() => {
+    const placed = requestAnimationFrame(() => axis.current?.classList.add('is-placed')); // put in place first, moved after
+    return () => cancelAnimationFrame(placed);
+  }, []);
+  return html`<div class="timeline axis" ref=${axis} onScroll=${() => menu && setMenu(null)}>
     ${menu && html`<div ref=${ref} class="menu axis-menu" role="menu" style=${`left:${menu.x}px;top:${menu.y}px`}>
       <button type="button" role="menuitem" class="menu-item" disabled=${!!project.turn} onClick=${() => branch(menu.hash)}><${Icon} name="copy" />${t('New model from this version')}</button>
     </div>`}
@@ -1318,6 +1568,7 @@ function History({ project, peek, now }) {
       </div>`;
     })}
     ${history.length === 0 && html`<div class="empty-chat"><p>${t('This model has no versions yet. The first one will appear after the first prompt.')}</p></div>`}
+    <div class="axis-mark" aria-hidden="true" />
   </div>`;
 }
 
@@ -1348,6 +1599,8 @@ async function refreshAccounts() {
 
 // The models side by side, one column per account, one row per size. Each
 // column says how that account is signed in on this computer; the app only reads that.
+// With one account (the other is not offered: see the settings) it is a plain
+// list of its models, and says how the account is signed in only when it is not.
 function ModelPicker({ info, model }) {
   const [open, setOpen] = useState(false);
   const ref = useDismiss(open, () => setOpen(false));
@@ -1360,29 +1613,28 @@ function ModelPicker({ info, model }) {
     const again = setTimeout(() => refreshAccounts().catch(() => {}), 4000);
     return () => clearTimeout(again);
   }, [open]);
-  const head = (provider) => html`<div class="picker-head" key=${provider.id}>
-    <div class="picker-name">${provider.name}</div>
-    <div class="picker-note">${!provider.installed ? html`${t('not installed')}: <a href=${provider.install} target="_blank" rel="noreferrer">${t('how to install')}</a>`
-      : provider.signedIn ? (provider.plan ? t('plan {plan}', { plan: provider.plan }) : t('signed in'))
-      : provider.otherSignIn ? t('signed in with {method}, not with a subscription', { method: provider.otherSignIn })
-      : tx('not signed in: sign in with {command} in a terminal', { command: mono(provider.command) })}</div>
-  </div>`;
+  const note = (provider) => (!provider.installed ? html`${t('not installed')}: <a href=${provider.install} target="_blank" rel="noreferrer">${t('how to install')}</a>`
+    : provider.signedIn ? (provider.plan ? t('plan {plan}', { plan: provider.plan }) : t('signed in'))
+    : provider.otherSignIn ? t('signed in with {method}, not with a subscription', { method: provider.otherSignIn })
+    : tx('not signed in: sign in with {command} in a terminal', { command: mono(provider.command) }));
+  const choose = (offered) => { setState({ model: offered.id }); setOpen(false); };
+  const only = providers[0] ?? null; // prompts run on one CLI: the settings say which
+  const [shown, closing] = useLeaving(open, 110); // closed, the menu is seen going, with the choice marked in it
 
   return html`<div class="picker" ref=${ref}>
     <button type="button" class="select picker-button" aria-haspopup="dialog" aria-expanded=${String(open)} title=${translate(current?.hint)} onClick=${() => setOpen(!open)}>
       ${current ? current.label : t('No AI model')}
     </button>
-    ${open && html`<div class="menu picker-menu" role="dialog" aria-label=${t('AI model')} style=${`--columns:${providers.length || 1}`}>
-      ${providers.map(head)}
-      ${(info.tiers ?? []).map((tier) => html`
-        ${providers.map((provider) => {
-          const offered = info.models.find((m) => m.provider === provider.id && m.tier === tier.id);
-          return html`<button type="button" key=${`${tier.id}/${provider.id}`} class=${`picker-model ${offered && offered.id === model ? 'is-current' : ''}`} disabled=${!offered}
-            aria-pressed=${String(!!offered && offered.id === model)} onClick=${() => { setState({ model: offered.id }); setOpen(false); }}>
-            ${offered ? offered.label : '–'}
-          </button>`;
-        })}
-        <div class="picker-hint" key=${`${tier.id}/hint`}>${translate(tier.hint)}</div>`)}
+    ${shown && html`<div class=${`menu picker-menu ${closing ? 'is-leaving' : ''}`} role="dialog" aria-label=${t('AI model')}>
+      ${(info.tiers ?? []).map((tier) => {
+        const offered = info.models.find((m) => (!only || m.provider === only.id) && m.tier === tier.id);
+        return offered && html`<button type="button" key=${tier.id} class=${`picker-row ${offered.id === model ? 'is-current' : ''}`}
+          aria-pressed=${String(offered.id === model)} onClick=${() => choose(offered)}>
+          <span class="picker-row-name">${offered.label}</span>
+          <span class="picker-row-hint">${translate(tier.hint)}</span>
+        </button>`;
+      })}
+      ${!info.models.length && only && html`<div class="picker-note"><b>${only.name}</b>: ${note(only)}</div>`}
     </div>`}
   </div>`;
 }
@@ -1470,7 +1722,7 @@ function Composer({ project, info, model, draft, setDraft, files, setFiles, onCa
           <${Thumb} src=${item.src} scan=${item.scan} /><span class="ellipsis">${item.name}</span>
         </button>`)}
       </div>`}
-      <div class="composer-row">
+      <div class="composer-row" onMouseDown=${(event) => { if (event.target.closest('button')) event.preventDefault(); }}>
         <${IconButton} icon="clip" label=${t('Attach files (pictures, drawings, notes, STL)')} onClick=${() => picker.current.click()} />
         <input ref=${picker} type="file" multiple hidden onChange=${(e) => { bringFiles(e.target.files, files, setFiles, setDraft); e.target.value = ''; }} />
         ${CAN_SHOOT && html`<${IconButton} icon="camera" label=${t('Take a photo (a sketch, a part, a drawing)')} onClick=${() => onCamera()} />`}
@@ -1554,8 +1806,6 @@ function ScanPanel({ project, scan, info, model }) {
   </div></div>`;
 }
 
-let tabFrom = null; // where on screen the clicked model tab was, for its slide to the new place
-
 function Side({ s, draft, setDraft, files, setFiles }) {
   const { project, info } = s;
   // A suggestion or an earlier prompt, put into the box ready to edit and send.
@@ -1590,33 +1840,65 @@ function Side({ s, draft, setDraft, files, setFiles }) {
   // An STL that is open takes the panel: it has no conversation, only what can be made from it.
   const scan = project?.scans.find((item) => item.name === s.scanOpen) ?? null;
   const listing = !!project && !scan && (s.listing || s.unpicked || !project.file);
-  // A model's tab travels between its place in the list and the top of the panel.
-  const side = useRef(null);
-  const wasListing = useRef(listing);
-  useLayoutEffect(() => {
-    if (wasListing.current === listing) return; // the list is still up while the clicked model loads
-    wasListing.current = listing;
-    const from = tabFrom;
-    tabFrom = null;
-    const tab = side.current?.querySelector(listing ? '.model-tab.is-current' : '.model-tab.is-open');
-    if (from == null || !tab || matchMedia('(prefers-reduced-motion: reduce)').matches) return;
-    const timing = { duration: 240, easing: 'cubic-bezier(.2, .8, .2, 1)' };
-    tab.animate([{ transform: `translateY(${from - tab.getBoundingClientRect().top}px)` }, { transform: 'none' }], timing);
-    for (const node of side.current.querySelectorAll('.side-tabs, .timeline, .params, .overview, .composer-wrap, .model-row, .model-add')) {
-      if (!node.contains(tab)) node.animate([{ opacity: 0 }, { opacity: 1 }], timing);
-    }
-  }, [listing, project?.file]);
   const meta = s.peek ? s.peek.meta : project?.good ?? null;
   // The name at the end of the path is edited where it stands: the open model or STL, or the project.
   const named = project && !listing ? `${scan ? 'scan' : 'file'}:${scan ? scan.name : project.file}` : `project:${s.projectId}`;
   const [naming, setNaming] = useState(null); // which name is being edited, as in `named`
-  return html`<aside class="side" ref=${side}>
+
+  // A move is drawn (see "going between the levels"): the path first, then what is under it.
+  const level = !s.projectId ? 0 : project && !listing ? 2 : 1; // how long the path is
+  const view = !project ? null : listing ? 'list' : named;      // what the panel holds under the path
+  const depth = !view ? 0 : listing ? 1 : 2;
+  const side = useRef(null);
+  const drawn = useRef({ level, view, depth, named, tab });
+  useLayoutEffect(() => {
+    const was = drawn.current;
+    drawn.current = { level, view, depth, named, tab };
+    const move = travel && performance.now() - travel.at < 5000 ? travel : null;
+    if (view || !s.projectId) travel = null; // the move ends with something to show, or with no project at all
+    const panel = side.current;
+    if (!panel || STILL.matches) return;
+    const head = panel.querySelector('.side-head');
+    const slide = (node, from, fade = true) => node?.animate([
+      { transform: `translateX(${from}px)`, ...(fade ? { opacity: 0 } : {}) },
+      { transform: 'none', ...(fade ? { opacity: 1 } : {}) },
+    ], GLIDE);
+    const appear = (node) => node?.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 220, easing: 'ease-out' });
+    // Another tab of the same model: what it holds comes from the side that tab is on.
+    if (view && view === was.view && tab !== was.tab) {
+      const place = (id) => TABS.findIndex(([name]) => name === id);
+      slide(panel.querySelector(':scope > .side-tabs + *'), Math.sign(place(tab) - place(was.tab)) * 14);
+      return;
+    }
+    if (!move) return; // not the person's doing: a file was renamed, or the page has just loaded
+    // Out of the list of projects the panel comes out from the left edge, whole (style.css, .side.is-away):
+    // what it holds rides with it and makes no move of its own.
+    if (move.fromHome && level > 0) return;
+    if (named !== was.named && level > 0) {
+      const leaf = head.querySelector('.crumb-rename');
+      const name = head.querySelector('[data-name="project"]');
+      if (level > was.level) slide(leaf, 24);      // one more name at the end: from the right
+      else if (level === was.level) appear(leaf);   // another model in the place of this one
+      if (level !== was.level) {
+        // The project's name moves between the end of the path and the way back; the words around it change.
+        if (was.level > 0 && move.nameAt != null && name) slide(name, move.nameAt - name.getBoundingClientRect().left, false);
+        for (const node of head.querySelectorAll('.crumb-kind, .crumb-root:not([data-name]), .crumb-sep')) appear(node);
+      }
+    }
+    if (view && view !== was.view) {
+      panel.dataset.moving = ''; // nothing sticks out of the panel on the way
+      const moves = [...panel.children].filter((node) => node !== head).map((node) => slide(node, Math.sign(depth - was.depth) * 20));
+      Promise.allSettled(moves.map((one) => one.finished)).then(() => { delete panel.dataset.moving; });
+    }
+  }, [level, view, named, tab]);
+
+  return html`<aside class=${`side ${s.home ? 'is-away' : ''}`} ref=${side}>
     <div class="side-head">
       <nav class="crumbs" aria-label=${t('Location')}>
         ${project && !listing
           // Inside a model or an STL the way back leads to the project's list; from the list, to all projects.
           ? html`<button type="button" class="crumb" title=${t('All models')} onClick=${showList}>
-              <${Icon} name="chevron" /><span class="crumb-kind">${t('Project')}</span><span class="crumb-root ellipsis">${s.projectId}</span>
+              <${Icon} name="chevron" /><span class="crumb-kind">${t('Project')}</span><span class="crumb-root ellipsis" data-name="project">${s.projectId}</span>
             </button>
             <span class="crumb-sep" aria-hidden="true">/</span>
             ${naming === named
@@ -1635,7 +1917,7 @@ function Side({ s, draft, setDraft, files, setFiles }) {
                     onSave=${(name) => renameProject(s.projectId, name)} />`
                 : html`<button type="button" class="crumb crumb-rename" title=${t('Rename the project {name}', { name: s.projectId })} disabled=${!project || !!project.turn}
                     onClick=${() => setNaming(named)}>
-                    <span class="crumb-name ellipsis">${s.projectId}</span><${Icon} name="pencil" />
+                    <span class="crumb-name ellipsis" data-name="project">${s.projectId}</span><${Icon} name="pencil" />
                   </button>`}`}`}
       </nav>
     </div>
@@ -1644,12 +1926,7 @@ function Side({ s, draft, setDraft, files, setFiles }) {
     <${ScanPanel} project=${project} scan=${scan} info=${info} model=${s.model} />`}
     ${project && !listing && !scan && html`
     <div class="side-tabs">
-      <div class="tabs" role="tablist">
-        <button type="button" role="tab" aria-selected=${String(tab === 'chat')} onClick=${() => setState({ tab: 'chat' })}>${t('Conversation')}</button>
-        <button type="button" role="tab" aria-selected=${String(tab === 'params')} onClick=${() => setState({ tab: 'params' })}>${t('Parameters')}</button>
-        <button type="button" role="tab" aria-selected=${String(tab === 'summary')} onClick=${() => setState({ tab: 'summary' })}>${t('Summary')}</button>
-        <button type="button" role="tab" aria-selected=${String(tab === 'history')} onClick=${() => setState({ tab: 'history' })}>${t('History')}</button>
-      </div>
+      <${Tabs} tab=${tab} />
     </div>`}
     ${project && !listing && !scan && (tab === 'chat'
       ? html`<${Timeline} project=${project} now=${s.now} models=${info.models} onSuggest=${reuse} onCamera=${camera} onPicture=${picture} onScan=${scanFile} />`
@@ -1879,12 +2156,11 @@ function ModelList({ project, unpicked, dragging, uploading }) {
   const picked = unpicked ? null : project.file;
   const [renaming, setRenaming] = useState(null); // the row whose name is being edited: { name, scan }
   const locked = !!project.turn;
-  const open = (show, name) => (event) => {
-    tabFrom = event.currentTarget.getBoundingClientRect().top;
-    attempt(() => show(name));
-  };
+  const open = (show, name) => () => attempt(() => show(name));
+  const list = useRef(null);
+  useRowMotion(list); // a copy appears, a deleted file goes, the rest make room
   // The row of a file while its name is edited: the same row, with a field where the name was.
-  const editing = (name, scan, src) => html`<div class=${`model-tab is-form ${scan ? 'is-scan' : ''}`} key=${scan ? `scan:${name}` : name}>
+  const editing = (name, scan, src) => html`<div class=${`model-tab is-form ${scan ? 'is-scan' : ''}`} key=${scan ? `scan:${name}` : name} data-row=${scan ? `scan:${name}` : name}>
     <${Thumb} src=${src} scan=${scan} />
     <${NameEdit} value=${name.replace(/\.(py|stl)$/i, '')} onSave=${(to) => renameFile(name, to, scan)} onClose=${() => setRenaming(null)} />
   </div>`;
@@ -1908,14 +2184,14 @@ function ModelList({ project, unpicked, dragging, uploading }) {
   });
   const canCreate = !locked && !!state.model && state.info?.engine?.scan === true;
 
-  return html`<div class=${`model-list ${state.opening ? 'is-loading' : ''} ${dragging ? 'is-over' : ''}`}>
+  return html`<div class=${`model-list ${state.opening ? 'is-loading' : ''} ${dragging ? 'is-over' : ''}`} ref=${list}>
     <div class="list-head">
       <span class="list-label">${t('Models')}</span>
       <button type="button" class="list-add" disabled=${locked} title=${t('New model')} onClick=${() => attempt(newModel)}><${Icon} name="plus" /><span>${t('New')}</span></button>
     </div>
     ${project.files.length === 0 && html`<p class="list-empty">${t('No model yet. Start an empty one, or make one from an STL below.')}</p>`}
     ${project.files.map((file) => (renaming?.name === file.name && !renaming.scan ? editing(file.name, false, modelThumb(project, file))
-      : html`<div class="model-row" key=${file.name}>
+      : html`<div class="model-row" key=${file.name} data-row=${file.name}>
           <button type="button" class=${`model-tab ${file.name === picked ? 'is-current' : ''}`} aria-expanded="false" onClick=${open(showModel, file.name)}>
             <${Thumb} src=${modelThumb(project, file)} /><span class="grow ellipsis">${bare(file.name)}</span>
             ${project.turn?.file === file.name && html`<span class="spinner" />`}
@@ -1934,7 +2210,7 @@ function ModelList({ project, unpicked, dragging, uploading }) {
     </div>
     ${project.scans.length === 0 && html`<p class="list-empty">${t('An STL is a finished shape without parameters. Load one to make a parametric model from it, or to take its dimensions when designing a part that has to fit it.')}</p>`}
     ${project.scans.map((scan) => (renaming?.name === scan.name && renaming.scan ? editing(scan.name, true, scanThumb(project, scan))
-      : html`<div class="model-row" key=${`scan:${scan.name}`}>
+      : html`<div class="model-row" key=${`scan:${scan.name}`} data-row=${`scan:${scan.name}`}>
         <button type="button" class="model-tab is-scan" aria-expanded="false" onClick=${open(showScan, scan.name)}>
           <${Thumb} src=${scanThumb(project, scan)} scan=${true} /><span class="grow ellipsis">${scan.name}</span>
         </button>
@@ -2008,16 +2284,27 @@ function Stage({ s }) {
   const scanOpen = project?.scans.some((scan) => scan.name === s.scanOpen) ? s.scanOpen : null;
   const meta = scanOpen || s.unpicked ? null : peek ? peek.meta : project?.good ?? null;
   const metaKey = meta?.key ?? null;
+
+  // What is on the stage: a model at one of its versions, or an STL. When it becomes another thing, the
+  // picture of the old one fades into the new one (`dissolve` in viewer.js). A model that was only built
+  // again takes the place of the old one as it is.
+  const version = useRef('head');
+  if (!peek) version.current = 'head';
+  else if (peek.meta) version.current = peek.rev; // while a version is on its way, the one before it stays up
+  const subject = !project ? null : scanOpen ? `scan:${scanOpen}` : s.unpicked || !project.file ? null : `${project.id}/${project.file}@${version.current}`;
+  const staged = useRef(subject);
+  const dissolve = staged.current !== subject;
+
   useEffect(() => {
     if (!viewer.current) return;
     if (!project || !meta) {
-      if (!peek || scanOpen || s.unpicked) viewer.current.show(null);
+      if (!peek || scanOpen || s.unpicked) viewer.current.show(null, null, { dissolve });
       return;
     }
     const id = project.id;
     const fresh = shownFor.current !== `${id}/${project.file}`;
     shownFor.current = `${id}/${project.file}`;
-    viewer.current.show(meta, (file) => `/api/projects/${id}/mesh/${meta.key}/${file}`, { fitView: fresh })
+    viewer.current.show(meta, (file) => `/api/projects/${id}/mesh/${meta.key}/${file}`, { fitView: fresh, dissolve })
       .catch((err) => toast(err.message, { error: true }));
   }, [project?.id, project?.file, metaKey]);
 
@@ -2027,11 +2314,13 @@ function Stage({ s }) {
   useEffect(() => {
     if (!viewer.current) return;
     const id = project?.id;
-    viewer.current.setScans(scans.map((scan) => ({ name: scan.name, url: `${scanPath(id, scan.name)}?v=${Math.round(scan.updatedAt)}` })))
+    viewer.current.setScans(scans.map((scan) => ({ name: scan.name, url: `${scanPath(id, scan.name)}?v=${Math.round(scan.updatedAt)}` })), { dissolve })
       .catch((err) => toast(err.message, { error: true }));
   }, [project?.id, scansKey]);
+  useEffect(() => { staged.current = subject; }); // after the two above: they have put it up
 
-  useEffect(() => { viewer.current?.setTheme(s.theme); }, [s.theme]);
+  // With the page, in one draw: the two fade into the other look together (changeTheme).
+  useLayoutEffect(() => { viewer.current?.setTheme(s.theme); }, [s.theme]);
 
   // The labels in the view hold numbers written in the language's way.
   useEffect(() => { viewer.current?.relabel(); }, [s.lang]);
@@ -2134,9 +2423,14 @@ function showHome() {
   events?.close();
   events = null;
   fileLoad += 1;
-  setState({ home: true, projectId: null, project: null, opening: null, peek: null, building: false, spot: null, scanOpen: null });
+  const left = state.projectId;
+  setState({ home: true, back: true, opening: null, peek: null, building: false, spot: null });
   history.replaceState(null, '', location.pathname);
   refreshProjects();
+  // The project stays drawn while the panel goes back past the left edge with it: nothing changes on the way.
+  const put = () => { if (state.home && state.projectId === left) setState({ projectId: null, project: null, scanOpen: null }); };
+  if (STILL.matches) put();
+  else setTimeout(put, 220);
 }
 
 function ProjectRow({ project, now }) {
@@ -2158,7 +2452,7 @@ function ProjectRow({ project, now }) {
   ].filter(Boolean).join(', ');
   // While its name is edited the row is not a button: the field stands where the name was.
   if (naming) {
-    return html`<li class="project-row is-form">
+    return html`<li class="project-row is-form" data-row=${project.id}>
       <div class="project-row-open">
         <${Icon} name="project" />
         <${NameEdit} value=${project.id} hint=${t('Its folder will be renamed too.')} onSave=${(name) => renameProject(project.id, name)} onClose=${() => setNaming(false)} />
@@ -2166,7 +2460,7 @@ function ProjectRow({ project, now }) {
       </div>
     </li>`;
   }
-  return html`<li class="project-row">
+  return html`<li class="project-row" data-row=${project.id}>
     <button type="button" class="project-row-open" onClick=${() => openProject(project.id)}>
       <${Icon} name="project" />
       <span class="project-row-text">
@@ -2183,17 +2477,42 @@ function ProjectRow({ project, now }) {
   </li>`;
 }
 
-function Home({ s }) {
+// Behind the list of projects: a sheet from the drawing board. One plate in two views, with its centre
+// lines, its dimensions and a section: what this app is for, drawn the old way. It only decorates.
+const SHEET = `
+  <defs><pattern id="sheet-hatch" width="7" height="7" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><line x1="0" y1="0" x2="0" y2="7"/></pattern></defs>
+  <path class="centre" d="M40 300H796M530 64V536M410 272V328M650 272V328"/>
+  <g class="outline">
+    <path d="M378 180H682A28 28 0 0 1 710 208V392A28 28 0 0 1 682 420H378A28 28 0 0 1 350 392V208A28 28 0 0 1 378 180Z"/>
+    <circle cx="530" cy="300" r="56"/><path d="M522 244.6V234H538V244.6"/>
+    <circle cx="410" cy="300" r="14"/><circle cx="650" cy="300" r="14"/>
+    <path class="hatch" d="M120 180H156V234H146V244H120Z"/><path class="hatch" d="M120 356H146V366H156V420H120Z"/>
+    <path d="M530 64V88M530 512V536"/>
+  </g>
+  <circle class="hidden" cx="530" cy="300" r="66"/>
+  <path d="M120 244V356M156 234V366"/>
+  <path d="M350 174V118M710 174V118M350 130H710M716 180H772M716 420H772M760 180V420"/>
+  <path d="M566 257.1L594 223H644M400.1 309.9L315 395H258M696 416.2L724 465H770"/>
+  <path d="M120 426V462M156 426V462M96 450H180M530 70H506M530 530H506"/>
+  <path class="solid" d="M350 130l9-3v6zM710 130l-9-3v6zM760 180l-3 9h6zM760 420l-3-9h6zM566 257.1L574.1 252.1L569.5 248.3ZM400.1 309.9L395.8 318.4L391.6 314.2ZM696 416.2L703.1 422.5L697.9 425.5ZM120 450l-9-3v6zM156 450l9-3v6zM506 70l9-3v6zM506 530l9-3v6z"/>
+  <text x="455" y="124">120</text><text x="754" y="250" transform="rotate(-90 754 250)">80</text>
+  <text x="619" y="217">⌀56</text><text x="286" y="389">2× ⌀14</text><text x="747" y="459">R28</text><text x="198" y="454">12</text>
+  <text x="494" y="74">A</text><text x="494" y="534">A</text><text x="138" y="166">A–A</text>`;
+
+function Home({ s, leaving = false }) {
   const projects = [...s.info.projects].sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0));
-  return html`<div class="home">
+  const list = useRef(null);
+  useRowMotion(list); // a copy appears, a deleted project goes, the rest make room
+  return html`<div class=${`home ${leaving ? 'is-leaving' : ''} ${s.back ? 'is-back' : ''}`}>
+    <svg class="home-sheet" viewBox="0 0 820 560" aria-hidden="true" dangerouslySetInnerHTML=${{ __html: SHEET }} />
     <header class="home-head">
       <button type="button" class="logo" title=${t('All projects')} aria-label=${t('All projects')} onClick=${showHome}><${Icon} name="box" /></button>
       <span class="home-brand">${document.title}</span>
       <span class="grow" />
-      <${LanguagePicker} lang=${s.lang} />
+      <${IconButton} icon="settings" label=${t('Settings')} small=${false} onClick=${() => setState({ dialog: { kind: 'settings' } })} />
       <${ThemeToggle} theme=${s.theme} />
     </header>
-    <main class="home-main">
+    <div class="home-body"><main class="home-main">
       <div class="home-title">
         <h1>${t('Projects')}</h1>
         <span class="grow" />
@@ -2203,11 +2522,10 @@ function Home({ s }) {
         ? html`<div class="home-empty">
             <p>${t('There are no projects yet. A project is a folder with models and STL files, with its own history of changes. Create one, or drop a model or an STL file onto the window.')}</p>
           </div>`
-        : html`<ul class="project-list">
+        : html`<ul class="project-list" ref=${list}>
             ${projects.map((project) => html`<${ProjectRow} key=${project.id} project=${project} now=${s.now} />`)}
           </ul>`}
-      <p class="home-foot">${tx('Projects are kept in {path}.', { path: mono(s.info.root) })}</p>
-    </main>
+    </main></div>
   </div>`;
 }
 
@@ -2215,6 +2533,9 @@ function Home({ s }) {
 
 function App() {
   const s = useStore();
+  // The list of projects and a dialog stay a moment after they are dismissed, to be seen leaving.
+  const [home, homeLeaving] = useLeaving(s.home, 120);
+  const [dialog, dialogLeaving] = useLeaving(s.dialog, 130);
   const [draft, setDraft] = useState('');
   const [files, setFiles] = useState([]);
   const filesRef = useRef(files);
@@ -2327,15 +2648,24 @@ function App() {
   return html`<div class="app">
     <${Side} s=${s} draft=${draft} setDraft=${setDraft} files=${files} setFiles=${setFiles} />
     <${Stage} s=${s} />
-    ${s.home && html`<${Home} s=${s} />`}
-    ${s.dialog?.kind === 'duplicate' && html`<${DuplicateDialog} projectId=${s.dialog.projectId} />`}
-    ${s.dialog?.kind === 'confirm' && html`<${ConfirmDialog} ...${s.dialog} />`}
-    ${s.dialog?.kind === 'camera' && html`<${CameraDialog} onUse=${(photo) => addPhoto(photo, s.dialog.sketch)} />`}
+    ${home && html`<${Home} s=${s} leaving=${homeLeaving} />`}
+    <div class=${`dialogs ${dialogLeaving ? 'is-leaving' : ''}`}>
+      ${dialog?.kind === 'duplicate' && html`<${DuplicateDialog} projectId=${dialog.projectId} />`}
+      ${dialog?.kind === 'settings' && html`<${SettingsDialog} lang=${s.lang} />`}
+      ${dialog?.kind === 'confirm' && html`<${ConfirmDialog} ...${dialog} />`}
+      ${dialog?.kind === 'camera' && html`<${CameraDialog} onUse=${(photo) => addPhoto(photo, dialog.sketch)} />`}
+    </div>
     <div class="toasts" role="status" aria-live="polite">
       ${s.toasts.map((item) => html`<div class=${`toast ${item.error ? 'is-error' : ''}`} key=${item.id}>${item.text}</div>`)}
     </div>
   </div>`;
 }
+
+// Names, numbers and requests full of both are typed here: the system leaves them as typed
+// (in the desktop app its window says the same, see desktop/window.py).
+document.addEventListener('focusin', (event) => {
+  if (event.target.matches?.('textarea, input:not([type]), input[type="text"], input[type="search"]')) event.target.setAttribute('autocorrect', 'off');
+});
 
 // The language first, so that nothing is drawn in the wrong one.
 setLanguage(preferredLanguage()).then((lang) => {

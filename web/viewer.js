@@ -630,9 +630,43 @@ export function createViewer(container) {
    * The camera stays where it is unless there was no model before, the model
    * changed size drastically, or `fitView` is true.
    */
-  async function show(meta, urlFor, { fitView = false } = {}) {
+  // One picture into the next. What is on the stage now is kept as a picture over it and faded away,
+  // while what is put up next fades in under it: another model, another version, an STL. The two are
+  // added together (style.css, .was), so what they share (the grid, an unchanged part) stays still.
+  let fading = null;
+  function fadeOver() {
+    const canvas = renderer.domElement;
+    if (matchMedia('(prefers-reduced-motion: reduce)').matches || !canvas.width || !canvas.height) return;
+    if (fading) {
+      if (performance.now() - fading.since < 120) return; // one that has just begun covers this change too
+      for (const node of fading.nodes) node.remove();
+    }
+    placeDimensions();
+    renderer.render(scene, camera); // read right after drawing: the buffer is not kept
+    const picture = document.createElement('canvas');
+    picture.width = canvas.width;
+    picture.height = canvas.height;
+    picture.getContext('2d').drawImage(canvas, 0, 0);
+    const labels = labelRenderer.domElement.cloneNode(true);
+    for (const node of [picture, labels]) node.classList.add('was');
+    canvas.after(picture);
+    labelRenderer.domElement.after(labels);
+    const mine = { nodes: [picture, labels], since: performance.now() };
+    fading = mine;
+    const timing = { duration: 340, easing: 'ease-in-out' };
+    const full = getComputedStyle(canvas).opacity;
+    for (const node of [canvas, labelRenderer.domElement]) node.animate([{ opacity: 0 }, { opacity: full }], timing);
+    Promise.allSettled(mine.nodes.map((node) => node.animate([{ opacity: full }, { opacity: 0 }], { ...timing, fill: 'forwards' }).finished)).then(() => {
+      for (const node of mine.nodes) node.remove();
+      if (fading === mine) fading = null;
+    });
+  }
+
+  /** Put a built model on the stage (`meta` of a build), or take it off (null). With `dissolve`, the picture before fades into it. */
+  async function show(meta, urlFor, { fitView = false, dissolve = false } = {}) {
     const loadId = ++state.loadId;
     if (!meta?.ok) {
+      if (dissolve) fadeOver();
       state.meta = null;
       state.modelBox = null;
       for (const group of [groups.solid, groups.ghost]) group.clear();
@@ -645,6 +679,7 @@ export function createViewer(container) {
     }));
     if (loadId !== state.loadId) return; // a newer build arrived meanwhile
 
+    if (dissolve) fadeOver();
     for (const group of [groups.solid, groups.ghost]) group.clear();
     for (const { part, geometry, edges } of loaded) {
       const printed = part.kind === 'show';
@@ -798,10 +833,11 @@ export function createViewer(container) {
   }
 
   /** Draw these scans ([{ name, url }]) with the model; an empty list hides them. */
-  async function setScans(list) {
+  async function setScans(list, { dissolve = false } = {}) {
     const loadId = ++state.scanLoadId;
     const loaded = await Promise.all(list.map(async (scan) => ({ scan, geometry: await loadScan(scan.url) })));
     if (loadId !== state.scanLoadId) return; // a newer list arrived meanwhile
+    if (dissolve) fadeOver();
     groups.scan.clear();
     let box = null;
     for (const { scan, geometry } of loaded) {

@@ -21,10 +21,11 @@ import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote_to_bytes, urlsplit
 
+from . import codex, keys, settings
 from .accounts import Accounts
-from .agent import Agent, default_model
+from .agent import PROVIDERS, Agent, default_model
 from .builder import Builder, cache_dir
-from .config import APP_DIR, PROJECTS_DIR, STATE_DIR, TIERS, same_secret
+from .config import APP_DIR, DEFAULT_PROJECTS_DIR, STATE_DIR, TIERS, api_keys_forced, keep_api_keys, projects_dir, same_secret
 from .projects import UserError, Workspace, stem_of
 
 MAX_BODY_BYTES = 48 * 1024 * 1024   # a prompt may carry dropped files
@@ -134,6 +135,40 @@ def open_with_default_app(file):
     if sys.platform == 'win32':
         return run('cmd', ['/c', 'start', '', file])
     return run('xdg-open', [file])
+
+
+def choose_folder(prompt, start):
+    """Ask the person for a folder with the system's own window. Its path, or None when they gave up or there is no such window."""
+    if sys.platform != 'darwin':
+        return None
+    script = ['on run argv', 'activate',
+              'POSIX path of (choose folder with prompt (item 1 of argv) default location (POSIX file (item 2 of argv)))',
+              'end run']
+    try:
+        done = subprocess.run(['osascript', *[part for line in script for part in ('-e', line)], prompt, start],
+                              stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    except OSError:
+        return None
+    path = done.stdout.decode('utf-8', 'replace').strip()
+    return (path.rstrip('/') or '/') if done.returncode == 0 and path else None
+
+
+def projects_folder(value):
+    """The folder a settings form names for projects, made if it is not there: its whole path, or '' for the app's own."""
+    text = str(value or '').strip()
+    if not text:
+        return ''
+    folder = os.path.expanduser(text)
+    if not os.path.isabs(folder):
+        raise UserError('Give the whole path of the folder.')
+    folder = os.path.abspath(folder)
+    try:
+        os.makedirs(folder, exist_ok=True)
+    except OSError:
+        raise UserError(f'The folder {folder} cannot be created.') from None
+    if not os.path.isdir(folder) or not os.access(folder, os.R_OK | os.W_OK | os.X_OK):
+        raise UserError(f'The folder {folder} cannot be written to.')
+    return folder
 
 
 def copy_file_to_clipboard(file):
@@ -375,11 +410,96 @@ class _App:
     def __init__(self, python, token, accounts):
         self.token = token
         self.accounts = accounts
-        self.builder = Builder(python)
-        self.workspace = Workspace(PROJECTS_DIR, self.builder)
+        self.python = python
+        self.root = projects_dir()  # the folder the projects are in
+        self.builder = Builder(python, self.root)
+        self.workspace = Workspace(self.root, self.builder)
         self.allowed_hosts = set()
         self.allowed_origins = set()
         self.agent = None
+        self.changing = threading.Lock()  # one change of settings at a time
+
+    def warm(self):
+        """Start the CAD kernel now, beside everything else, so the first build does not wait for the import."""
+        builder = self.builder
+
+        def start():
+            try:
+                builder.start()
+            except Exception as err:  # noqa: BLE001
+                if builder is self.builder:
+                    print(str(err), file=sys.stderr)
+
+        threading.Thread(target=start, daemon=True).start()
+
+    # --- settings ----------------------------------------------------------------
+
+    def shown_settings(self):
+        """The settings as the page shows them, with what the app uses where nothing was chosen."""
+        chosen = settings.everything()
+        return {
+            'projects': chosen['projects'],
+            'projectsDefault': DEFAULT_PROJECTS_DIR,
+            'assistant': self.accounts.current() or chosen['assistant'] or 'claude',  # the CLI prompts run on: never none
+            'billing': 'api-key' if keep_api_keys() else 'subscription',
+            'billingForced': api_keys_forced(),  # started with --api-keys: not for the page to switch off
+            # Of a typed API key the page learns that it is kept and how it ends, never the key.
+            'clis': [{'id': id, 'name': provider['name'], 'path': chosen[id], 'found': codex.find(id),
+                      'key': provider['key'], 'keyKept': bool(keys.get(id)), 'keyEnding': keys.ending(id)}
+                     for id, provider in PROVIDERS.items()],
+            'canChooseFolder': sys.platform == 'darwin',
+        }
+
+    def change_settings(self, body):
+        """Keep what a settings form sent and put it to use at once. Nothing is kept when any of it is refused."""
+        patch = {}
+        if 'billing' in body:
+            if body['billing'] not in settings.BILLING:
+                raise UserError('Invalid request data.')
+            patch['billing'] = body['billing']
+        if 'assistant' in body:
+            if body['assistant'] not in settings.ASSISTANTS:
+                raise UserError('Invalid request data.')
+            patch['assistant'] = body['assistant']
+        for id, provider in PROVIDERS.items():
+            if id in body:
+                path = str(body[id] or '').strip()
+                if path and not codex.program_at(path):
+                    raise UserError(f"There is no {provider['name']} at {path}.")
+                patch[id] = path
+        # API keys typed in: a new one to keep, or '' to forget the one that is kept.
+        typed = {}
+        for id in (PROVIDERS if isinstance(body.get('keys'), dict) else []):
+            if id in body['keys']:
+                key = str(body['keys'][id] or '').strip()
+                if key and not keys.usable(key):
+                    raise UserError('This does not look like an API key.')
+                typed[id] = key
+        with self.changing:
+            if 'projects' in body:
+                patch['projects'] = projects_folder(body['projects'])
+                root = patch['projects'] or DEFAULT_PROJECTS_DIR
+                moved = os.path.realpath(root) != os.path.realpath(self.root)
+                if moved and any(project.turn for project in list(self.workspace.projects.values())):
+                    raise UserError('A prompt is still being worked on. Wait for it, or stop it, and try again.', 409)
+            else:
+                moved = False
+            before = settings.everything()
+            after = settings.save(patch)
+            if moved:
+                # Another folder is another set of projects, and other walls around the models that are built.
+                old = self.builder
+                self.root = root
+                self.builder = Builder(self.python, root)
+                self.workspace = Workspace(root, self.builder)
+                old.stop()
+                self.warm()
+            changed = [id for id, key in typed.items() if key != keys.get(id)]
+            for id in changed:
+                keys.put(id, typed[id])
+            if changed or any(before[name] != after[name] for name in ('billing', 'assistant', *PROVIDERS)):
+                self.accounts.refresh()  # who is signed in, and with what, is asked again
+        return self.shown_settings()
 
     def authorized(self, req):
         given = req.bearer()
@@ -689,11 +809,20 @@ class _App:
                 'tiers': TIERS,
                 'models': models,
                 'defaultModel': default_model(models) if models else None,
-                'root': PROJECTS_DIR,
+                'root': self.root,
                 'engine': self.builder.info,
                 'limits': self.agent.limits,
                 'projects': self.workspace.list(),
             })
+        if first == 'settings' and len(segments) == 1 and req.command == 'GET':
+            return req.send_json(200, self.shown_settings())
+        if first == 'settings' and len(segments) == 1 and req.command == 'POST':
+            return req.send_json(200, self.change_settings(req.read_object()))
+        if first == 'settings' and segments[1:] == ['folder'] and req.command == 'POST':
+            body = req.read_object()
+            start = os.path.expanduser(str(body.get('start') or ''))
+            return req.send_json(200, {'path': choose_folder(str(body.get('prompt') or 'Folder'),
+                                                             start if os.path.isdir(start) else os.path.expanduser('~'))})
         if first == 'projects' and len(segments) == 1 and req.command == 'POST':
             body = req.read_object()
             project = self.workspace.create(
@@ -797,13 +926,5 @@ def start_server(port, python, token, account=None, models=None, accounts=None):
 
     accounts.on_change = models_changed
     thread.start()
-
-    # Warm the CAD kernel now so the first build does not wait for the import.
-    def warm():
-        try:
-            app.builder.start()
-        except Exception as err:  # noqa: BLE001
-            print(str(err), file=sys.stderr)
-
-    threading.Thread(target=warm, daemon=True).start()
+    app.warm()
     return running

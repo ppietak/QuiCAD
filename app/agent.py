@@ -34,7 +34,7 @@ from .projects import UserError, stem_of
 from .prompt import compose_message, js_length, js_slice, js_string, js_trim, system_prompt_for, tools_for
 from .report import checks_failed, report_for, scan_fit
 
-BIN = os.environ.get('CLAUDE_BIN') or 'claude'
+NAME = 'claude'
 EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max']
 EFFORT = os.environ.get('APP_EFFORT') if os.environ.get('APP_EFFORT') in EFFORTS else 'low'
 THINKING = os.environ.get('APP_THINKING') != '0'
@@ -110,11 +110,11 @@ def _child_env():
     env = dict(os.environ)
     for name in [*([] if keep_api_keys() else BILLING_ENV), *NESTED_ENV]:
         env.pop(name, None)
-    return env
+    return codex.with_key(env, NAME)
 
 
 def _capture(args):
-    command = codex.resolve(BIN)
+    command = codex.resolve(NAME)
     if not command:
         return {'out': '', 'missing': True}
     try:
@@ -151,8 +151,8 @@ def account_status():
 # The CLIs a turn can run on, each with the person's own sign-in: what is
 # installed, what is signed in with a plan, and the models that gives.
 PROVIDERS = {
-    'claude': {'name': 'Claude Code', 'command': 'claude', 'install': 'https://claude.com/claude-code', 'status': lambda: account_status(), 'models': lambda: MODELS},
-    'codex': {'name': 'Codex', 'command': 'codex', 'install': 'https://developers.openai.com/codex/cli', 'status': codex.account_status, 'models': codex.models},
+    'claude': {'name': 'Claude Code', 'command': 'claude', 'install': 'https://claude.com/claude-code', 'key': 'Anthropic API key', 'status': lambda: account_status(), 'models': lambda: MODELS},
+    'codex': {'name': 'Codex', 'command': 'codex', 'install': 'https://developers.openai.com/codex/cli', 'key': 'OpenAI API key', 'status': codex.account_status, 'models': codex.models},
 }
 
 
@@ -161,6 +161,9 @@ def providers():
     found = []
     for id, provider in PROVIDERS.items():
         account = provider['status']()
+        if account['installed'] and codex.typed_key(id):
+            # The key typed into the settings is what the CLI will run on: it comes before a plan it is signed in with.
+            account = {**account, 'loggedIn': True, 'subscription': False, 'authMethod': 'API key', 'plan': None}
         found.append({
             'id': id, 'name': provider['name'], 'command': provider['command'], 'install': provider['install'],
             **account,
@@ -686,10 +689,10 @@ class Agent:
             with turn.lock:
                 if turn.stopped:
                     return  # stopped before Claude Code was started
-                command = codex.resolve(BIN)
+                command = codex.resolve(NAME)
                 try:
                     if not command:
-                        raise FileNotFoundError(f'spawn {BIN} ENOENT')
+                        raise FileNotFoundError(f'spawn {NAME} ENOENT')
                     child = subprocess.Popen([command, *args], cwd=cwd, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                 except OSError as err:
                     _turn_log(turn, {'event': 'claude.error', 'message': str(err)})

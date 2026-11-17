@@ -16,11 +16,16 @@ import subprocess
 import threading
 import time
 
+from . import keys, settings
 from .config import DEFAULT_TIER, TIERS, keep_api_keys
 
 from .prompt import js_trim
 
-BIN = os.environ.get('CODEX_BIN') or 'codex'
+NAME = 'codex'
+# Where the CLIs usually are. A terminal has these in its PATH; an app started
+# from the Dock does not get that PATH.
+USUAL_PLACES = ['~/.local/bin', '~/.claude/local', '/opt/homebrew/bin', '/usr/local/bin',
+                '~/.npm-global/bin', '~/.bun/bin', '~/.volta/bin', '~/bin']
 KEY_VARIABLE = 'APP_TURN_KEY'  # the turn's key travels in the environment, not on the command line
 # Which of Codex's models stands for each size, most wanted first.
 TIER_MODELS = {
@@ -39,22 +44,52 @@ EFFORT = {'low': 'low', 'medium': 'medium', 'high': 'high', 'xhigh': 'high', 'ma
 IMAGE_SUFFIX = {'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp', 'image/gif': 'gif'}
 
 
+# Where each CLI looks for an API key of its own. `codex exec` takes CODEX_API_KEY for one run.
+KEY_ENV = {'claude': ['ANTHROPIC_API_KEY'], 'codex': ['CODEX_API_KEY', 'OPENAI_API_KEY']}
+
+
+def typed_key(provider):
+    """The API key typed into the settings for this CLI, while turns may be billed to a key; '' otherwise."""
+    return keys.get(provider) if keep_api_keys() else ''
+
+
+def with_key(env, provider):
+    """The environment for a CLI, with the typed key where that CLI looks for one. It comes before a key found there."""
+    key = typed_key(provider)
+    for name in (KEY_ENV[provider] if key else []):
+        env[name] = key
+    return env
+
+
 def _child_env(extra=None):
     env = {**os.environ, **(extra or {})}
     for name in ([] if keep_api_keys() else STRIPPED_ENV):
         env.pop(name, None)
-    return env
+    return with_key(env, NAME)
 
 
 # --- starting a CLI and following its output (shared with agent.py) -----------
 
-def resolve(command):
+def find(name):
+    """Where a CLI is on this computer when nobody says: on the PATH, else in the usual places. None when nowhere."""
+    return shutil.which(name) or shutil.which(name, path=os.pathsep.join(os.path.expanduser(place) for place in USUAL_PLACES))
+
+
+def program_at(path):
+    """The full path of the program `path` names, or None when there is none to run there."""
+    return shutil.which(os.path.expanduser(path))
+
+
+def resolve(name):
     """
-    The full path of a CLI, or None when it is not installed. On Windows the
-    CLIs npm installs are `.cmd` shims, which start only by their full name;
-    looking the command up first starts those and real executables alike.
+    The full path of a CLI (`claude` or `codex`), or None when it is not
+    installed: the one the settings name (or the CLAUDE_BIN / CODEX_BIN
+    variable), else the one found on this computer. On Windows the CLIs npm
+    installs are `.cmd` shims, which start only by their full name; looking the
+    command up first starts those and real executables alike.
     """
-    return shutil.which(command)
+    chosen = settings.get(name) or os.environ.get(f'{name.upper()}_BIN')
+    return program_at(chosen) if chosen else find(name)
 
 
 def exit_of(returncode):
@@ -142,7 +177,7 @@ def decode_base64(text):
 
 
 def _capture(args):
-    command = resolve(BIN)
+    command = resolve(NAME)
     if not command:
         return {'out': '', 'missing': True}
     try:
@@ -338,10 +373,10 @@ def converse(turn, content, *, system, tools, cwd, model, log, on_phase):
         with turn.lock:
             if turn.stopped:
                 return done()
-            command = resolve(BIN)
+            command = resolve(NAME)
             try:
                 if not command:
-                    raise FileNotFoundError(f'spawn {BIN} ENOENT')
+                    raise FileNotFoundError(f'spawn {NAME} ENOENT')
                 child = subprocess.Popen(
                     [command, *args], cwd=cwd, env=_child_env({KEY_VARIABLE: tools['key']}),
                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,

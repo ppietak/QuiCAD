@@ -1,6 +1,8 @@
 # Where things live, and the Python environment the build worker runs in.
-# Everything stays inside the app's own folder: projects in projects/, the
-# Python environment and the page's access key in .data/.
+# Run from its folder (`./start`), the app keeps everything inside it: projects
+# in projects/, the Python environment and the page's access key in .data/.
+# The APP_DATA and APP_PROJECTS variables name other folders (the desktop app
+# sets them), and the settings screen can move the projects.
 #
 # This module is imported by the launcher before the environment exists, with
 # whatever `python3` the system has: it must stay importable on Python 3.8.
@@ -13,15 +15,29 @@ import sys
 
 APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR = os.environ.get('APP_DATA') or os.path.join(APP_DIR, '.data')
-PROJECTS_DIR = os.environ.get('APP_PROJECTS') or os.path.join(APP_DIR, 'projects')
+DEFAULT_PROJECTS_DIR = os.environ.get('APP_PROJECTS') or os.path.join(APP_DIR, 'projects')
 TRASH_DIR = os.path.join(DATA_DIR, 'trash')  # deleted projects end up here, whole
+DEFAULT_PORT = 4610
+
+
+def projects_dir():
+    """The folder projects are kept in: the one chosen in the settings, else the app's own."""
+    from . import settings
+    return settings.get('projects') or DEFAULT_PROJECTS_DIR
+
+
+def api_keys_forced():
+    """Whether the app was started with `--api-keys`: the settings cannot switch that off."""
+    return os.environ.get('APP_API_KEYS') == '1'
 
 
 def keep_api_keys():
-    """Whether the CLIs may run on an API key or a cloud provider found in the environment
-    (`./start --api-keys`). Off by default: turns then always run on the subscription."""
-    return os.environ.get('APP_API_KEYS') == '1'
-DEFAULT_PORT = 4610
+    """Whether the CLIs may run on an API key or a cloud provider they have or find in the
+    environment (`./start --api-keys`, or chosen in the settings). Off by default: turns
+    then always run on the subscription."""
+    from . import settings
+    return api_keys_forced() or settings.get('billing') == 'api-key'
+
 
 DEFAULT_FILE = 'model.py'  # the name a project's first model gets
 MERGED_STL = 'model.stl'   # in a build's cache folder: every printed part together

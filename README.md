@@ -17,7 +17,8 @@ way while it is built, so the result is real, parameterized, editable CAD with
 STL export. The modeling is done through the
 [Claude Code](https://claude.com/claude-code) or
 [Codex](https://developers.openai.com/codex/cli) CLI you already have, on your
-subscription. There is no other account, key or cloud.
+subscription. There is no other account or cloud, and no key unless you choose
+to pay per use.
 
 ## What it does
 
@@ -57,7 +58,8 @@ subscription. There is no other account, key or cloud.
 ## Getting started
 
 You need `python3`, `git`, and the Claude Code or Codex CLI, signed in with
-your subscription (the editor uses whichever is signed in on your computer).
+your subscription (the editor uses the one it finds; with both, the settings
+say which).
 Nothing else: no Node, no packages to install by hand. Works on macOS and Linux.
 
 ```sh
@@ -69,12 +71,21 @@ cd QuiCAD
 The first start installs build123d into `.data/venv`, which takes about a
 minute. Your projects are folders in `projects/`, each its own git repository.
 
+The sliders on the projects page open the settings: the language, the folder
+projects are kept in, which CLI runs the prompts, whether they are billed to
+your plan or to an API key (which can be typed in there), and where Claude Code
+and Codex are when the app does not find them by itself.
+
 ## Good to know
 
-- The app never touches your credentials and listens on 127.0.0.1 only.
+- The app listens on 127.0.0.1 only and never touches the sign-in of your CLI.
 - Turns run on your subscription. An API key found in the environment
   (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`) is not passed to the CLI, so nothing
-  is billed per use by surprise; `./start --api-keys` passes it on.
+  is billed per use by surprise; `./start --api-keys` passes it on, and so does
+  choosing "API key" in the settings.
+- With "API key" chosen, a key typed in the settings is used before any other.
+  It is kept in `keys.json` in the data folder (`.data`), a file only you can
+  read; it is never sent back to the page and goes only to the CLI it is for.
 - A model is Python code and runs on your computer when it is built. It runs
   fenced in: it can use only the files of its own project, start no programs
   and reach no network (on macOS the system sandbox enforces this too). Still,

@@ -10,6 +10,9 @@ FIELD = '\x1f'
 RECORD = '\x1e'
 _SPACES = re.compile(r'\s+')
 
+# The git on this computer, or the one the app brought with it (the desktop app has its own).
+GIT = os.environ.get('APP_GIT') or 'git'
+
 # Signing and hooks belong to the person's own repositories, not to these.
 # (No hooks: the null device, under the name git knows it by on this system.)
 _NO_HOOKS = 'NUL' if os.name == 'nt' else '/dev/null'
@@ -22,7 +25,7 @@ def _exec(dir, args, env=None):
     """Run git in `dir`; never raises: `{'ok', 'stdout', 'stderr'}`."""
     try:
         done = subprocess.run(
-            ['git', '-C', dir, *BASE_ARGS, *args],
+            [GIT, '-C', dir, *BASE_ARGS, *args],
             env={**os.environ, **(env or {})},
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         )
